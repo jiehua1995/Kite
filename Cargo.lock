@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "kite"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -737,11 +737,14 @@ dependencies = [
  "fastrand",
  "flate2",
  "itoa",
+ "libdeflater",
  "manifolds-rs",
+ "memchr",
  "memmap2",
  "mimalloc",
  "rand 0.9.2",
  "rayon",
+ "rustc-hash",
  "smallvec",
  "time",
  "zstd",
@@ -758,6 +761,24 @@ name = "libc"
 version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
+
+[[package]]
+name = "libdeflate-sys"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72753e0008ea87963d2f0770042d0df7abe51fafbb8dcaf618ac440f2f1fec0a"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "libdeflater"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1ee41cf6fb1bb6030dfb59ffb7bc01ab26aade44142084c87f0fc7a1658fe71"
+dependencies = [
+ "libdeflate-sys",
+]
 
 [[package]]
 name = "libm"

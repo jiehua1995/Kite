@@ -7,6 +7,7 @@ mod count;
 mod dump;
 mod histo;
 mod info;
+mod merge;
 mod profile;
 mod query;
 mod sketch;
@@ -36,6 +37,7 @@ fn main() -> Result<()> {
         Commands::Query(args) => query::run(&args)?,
         Commands::Histo(args) => histo::run(&args)?,
         Commands::Profile(args) => profile::run(&args)?,
+        Commands::Merge(args) => merge::run(&args)?,
         Commands::Sketch(args) => sketch::run(&args)?,
         Commands::Citation => citation::run()?,
     }

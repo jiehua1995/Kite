@@ -80,6 +80,7 @@ pub struct KiteStats {
 /// English: Header patch record used to back-fill payload length after the
 /// payload has been written.
 pub struct HeaderPatch {
+    pub entries_pos: u64,
     pub payload_len_pos: u64,
 }
 
@@ -118,6 +119,7 @@ pub fn write_header<W: Write + Seek>(writer: &mut W, info: &KiteInfo) -> Result<
     writer.write_all(&[0u8])?;
     writer.write_all(&(info.k as u16).to_le_bytes())?;
     writer.write_all(&(info.words as u16).to_le_bytes())?;
+    let entries_pos = writer.stream_position()?;
     writer.write_all(&info.entries.to_le_bytes())?;
     let payload_len_pos = writer.stream_position()?;
     writer.write_all(&0u64.to_le_bytes())?;
@@ -125,7 +127,10 @@ pub fn write_header<W: Write + Seek>(writer: &mut W, info: &KiteInfo) -> Result<
     writer.write_all(metadata_bytes)?;
     writer.flush()?;
 
-    Ok(HeaderPatch { payload_len_pos })
+    Ok(HeaderPatch {
+        entries_pos,
+        payload_len_pos,
+    })
 }
 
 /// 中文：在 payload 写完后回填实际的 payload 字节数。
@@ -136,6 +141,27 @@ pub fn patch_payload_bytes(path: &Path, patch: HeaderPatch, payload_bytes: u64) 
         .write(true)
         .open(path)
         .with_context(|| format!("Failed to open {} for header patch", path.display()))?;
+    file.seek(SeekFrom::Start(patch.payload_len_pos))?;
+    file.write_all(&payload_bytes.to_le_bytes())?;
+    file.flush()?;
+    Ok(())
+}
+
+/// 中文：在流式写出结束后同时回填 entry 数和 payload 长度。
+/// English: Patch both the entry count and payload byte length after a
+/// streaming write finishes.
+pub fn patch_entries_and_payload(
+    path: &Path,
+    patch: HeaderPatch,
+    entries: u64,
+    payload_bytes: u64,
+) -> Result<()> {
+    let mut file = File::options()
+        .write(true)
+        .open(path)
+        .with_context(|| format!("Failed to open {} for header patch", path.display()))?;
+    file.seek(SeekFrom::Start(patch.entries_pos))?;
+    file.write_all(&entries.to_le_bytes())?;
     file.seek(SeekFrom::Start(patch.payload_len_pos))?;
     file.write_all(&payload_bytes.to_le_bytes())?;
     file.flush()?;

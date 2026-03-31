@@ -1,6 +1,6 @@
 [package]
 name = "kite"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -19,6 +19,9 @@ itoa = "1"
 time = { version = "0.3", features = ["formatting"] }
 manifolds-rs = "0.1.12"
 faer = "0.23.2"
+memchr = "2.7.6"
+libdeflater = "1.25.2"
+rustc-hash = "2.1.1"
 
 [profile.release]
 opt-level = 3

@@ -302,14 +302,14 @@ fn counting_pass_u64_16_buf(
     // fallback serial path with light unrolling (or AVX2 accelerated if available)
     #[cfg(all(target_arch = "x86_64"))]
     {
+        for c in counts.iter_mut() {
+            *c = 0;
+        }
         if is_x86_feature_detected!("avx2") {
             unsafe {
                 counting_pass_u64_16_avx2_count(from, counts, shift);
             }
         } else {
-            for c in counts.iter_mut() {
-                *c = 0;
-            }
             let mut i = 0;
             let len = from.len();
             while i + 4 <= len {
@@ -438,7 +438,7 @@ fn counting_pass_u128_16_buf(
 fn ensure_scratch_len<T: Copy>(scratch: &mut Vec<T>, len: usize) {
     if scratch.len() != len {
         if scratch.capacity() < len {
-            scratch.reserve(len - scratch.capacity());
+            scratch.reserve(len - scratch.len());
         }
         unsafe {
             scratch.set_len(len);

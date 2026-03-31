@@ -16,6 +16,7 @@ Kite is a Rust command-line toolkit for:
 - metadata inspection
 - single-k-mer querying
 - histogram generation
+- exact database merging
 - multi-sample profiling
 - sketch-style exploratory analysis
 
@@ -34,6 +35,7 @@ That means:
 - `src/count/` owns counting logic
 - `src/dump/` owns dumping and decode-side logic
 - `src/profile/` owns profile logic
+- `src/merge/` owns exact database merging logic
 - `src/sketch/` owns sketch logic
 
 Only truly shared concepts belong in `src/utils/`, especially:
@@ -54,6 +56,7 @@ src/
   info/
   query/
   histo/
+  merge/
   profile/
   sketch/
   citation/
@@ -76,6 +79,7 @@ Notes:
 
 - primary performance-critical command
 - supports `u64`, `u128`, and packed modes automatically based on `k`
+- optimized `.fastq.gz` ingestion uses block decompression, record-boundary alignment, and direct worker-side FASTQ parsing; BGZF input is detected and routed to a libdeflater-backed parallel BGZF block pipeline
 
 ### `kite dump`
 
@@ -121,6 +125,21 @@ Current limitation:
 
 - currently intended for `u64` databases, therefore effectively `k <= 32`
 
+### `kite merge`
+
+Input:
+
+- two or more `.kite` files
+
+Output:
+
+- one merged `.kite`
+
+Notes:
+
+- counts are summed exactly for identical k-mers
+- all inputs must share the same `k`, internal mode, and canonical semantics
+
 ### `kite sketch`
 
 Output:
@@ -146,10 +165,10 @@ Output:
 | `-k` | `--kmer` | k-mer length | required | Must be provided. Drives both biology and internal representation mode. | Changes the result domain and the selected storage path. |
 | `-i` | `--input` | input FASTQ / FASTQ.GZ | required | Point to the sequencing file. | Input size and compression affect runtime only through I/O and parsing cost. |
 | `-o` | `--output` | output `.kite` path | required | Choose the destination database path. | Output device speed affects runtime, not count values. |
-| `-m` | `--minimizer` | minimizer length | `15` | Must satisfy `1 <= m <= k`; current implementation expects `m <= 32`. | Changes partition behavior and locality. Should not change final counts. |
 | none | `--partitions` | partition count | `256` | Tune only when doing performance work. | Changes partition balance and merge overhead. Should not change final counts. |
-| none | `--threads` | worker threads | `8` | Match CPU and memory bandwidth. | Directly affects runtime. Should not change final counts. |
+| none | `--threads` | total count-side thread budget | `8` | Match available CPU cores. Kite may split this budget across decompression and counting workers for compressed input. | Directly affects runtime and internal pipeline layout. Should not change final counts. |
 | none | `--chunk-kmers` | chunk flush threshold | `1000000` | Tune for memory-versus-flush trade-offs. | Changes memory behavior and speed, not final counts. |
+| none | `--max-memory-gb` | optional memory budget for adaptive buffering | auto | Increase on large-memory servers when you want deeper count-side queues and more aggressive ingestion buffers. | Changes buffering strategy and throughput, not final counts. |
 | none | `--canonical` | canonical mode | `true` | Use `false` only when strand-sensitive or non-canonical comparisons are required. | Changes the meaning of the count table by merging or not merging reverse complements. |
 | `-p` | `--progress` | progress display | `false` | Enable for visibility during long runs. | Slight output overhead, no result change. |
 | none | `--baseline` | reference pipeline | `false` | Use for debugging or algorithm comparison, not routine benchmarking. | Usually slower; intended to preserve result semantics. |
@@ -198,6 +217,17 @@ Output:
 | none | `--format` | output format | `tsv` | Choose `tsv`, `csv`, or `txt` based on downstream tooling. | Changes separator style, not the underlying values. |
 | `-p` | `--progress` | progress spinner | `false` | Enable when you want visible progress during matrix generation. | Slight output overhead, no result change. |
 
+### `kite merge`
+
+| Short | Long | Meaning | Default | Usage Guidance | Effect On Speed And Result |
+|---|---|---|---|---|---|
+| `-i` | `--input` | two or more input `.kite` files | required | Provide compatible inputs after `-i`; they must share the same `k`, the same internal mode, and the same canonical setting. | Changes which databases are added together. |
+| `-o` | `--output` | output merged `.kite` path | required | Choose the destination merged database. | Output location affects runtime, not merged values. |
+| none | `--threads` | worker threads for merged-file compression | `8` | Tune only if you are benchmarking large merged outputs. | Affects write speed only. |
+| none | `--mode` | write mode for the merged file | `fast` | Choose `fast`, `balanced`, or `compact` depending on whether you prefer write speed or output size. | Changes output compression behavior, not merged counts. |
+| none | `--zstd-level` | compression level override | mode-dependent | Use only when explicit compression control is needed. | Higher levels usually increase CPU time and reduce file size. |
+| `-p` | `--progress` | progress spinner | `false` | Enable when you want visible progress during merge. | Slight output overhead, no result change. |
+
 ### `kite sketch`
 
 | Short | Long | Meaning | Default | Usage Guidance | Effect On Speed And Result |
@@ -233,6 +263,7 @@ If you modify the format, you must keep these in agreement:
 - info
 - query
 - histo
+- merge
 - any downstream helper that reads `.kite`
 
 Treat `src/utils/kite.rs` as the source of truth for format semantics.
@@ -311,6 +342,12 @@ target/release/kite.exe histo -i sample.kite -o sample.histo.tsv
 target/release/kite.exe profile -i sample1.kite sample2.kite -o profile.tsv --format tsv
 ```
 
+### Merge
+
+```bash
+target/release/kite.exe merge -i sample1.kite sample2.kite sample3.kite -o merged.kite --threads 8 --mode fast
+```
+
 ### Sketch
 
 ```bash
@@ -335,6 +372,7 @@ Do not imply support that the current code does not provide.
 count builds a .kite database
 dump turns .kite into exact TSV
 info/query/histo inspect one .kite
+merge combines multiple .kite files into one exact summed database
 profile/sketch combine multiple .kite files
 utils/kite.rs defines the shared file-format contract
 ```

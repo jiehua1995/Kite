@@ -9,7 +9,7 @@ Kite is a high-performance k-mer counting and analysis toolkit written in Rust. 
 
 Kite reads sequencing data, extracts k-mers, stores them in a compact `.kite` database, and exposes a family of subcommands for inspection and lightweight comparative analysis. The project is organized so that each subcommand has its own implementation directory in `src/`, while the shared `.kite` format definition lives in `src/utils/kite.rs`.
 
-This separation is intentional. It allows `count`, `dump`, `info`, `query`, `histo`, `profile`, and `sketch` to evolve independently without forcing one command to inherit the performance trade-offs of another.
+This separation is intentional. It allows `count`, `dump`, `info`, `query`, `histo`, `merge`, `profile`, and `sketch` to evolve independently without forcing one command to inherit the performance trade-offs of another.
 
 ## Key Features
 
@@ -20,6 +20,7 @@ This separation is intentional. It allows `count`, `dump`, `info`, `query`, `his
   - packed multi-word representation for `k > 64`
 - Unified `.kite` binary format with explicit metadata.
 - Built-in `dump`, `info`, `query`, and `histo` commands for direct database inspection.
+- Built-in `merge` for exact database-to-database count summation.
 - Built-in multi-sample `profile` and `sketch` commands for downstream exploratory analysis.
 - Canonical k-mer support.
 - Zstandard-compressed storage with multiple write modes.
@@ -34,6 +35,7 @@ Many k-mer tools are excellent at one narrow stage of the workflow but force the
 - `info` explains what is inside the database.
 - `query` answers targeted questions.
 - `histo` summarizes abundance structure.
+- `merge` combines two or more exact databases into one exact database by summing shared k-mers.
 - `profile` produces a union frequency table across samples.
 - `sketch` writes exact multi-sample count-derived tables for correlation, projection, and heatmap workflows, plus plotting-only R scripts.
 
@@ -46,6 +48,7 @@ Many k-mer tools are excellent at one narrow stage of the workflow but force the
 | `kite info` | Print metadata and summary statistics for one database | stdout |
 | `kite query` | Look up one exact k-mer count | stdout |
 | `kite histo` | Write a histogram of count frequencies | `.tsv` |
+| `kite merge` | Merge two or more compatible `.kite` databases by summing exact counts | `.kite` |
 | `kite profile` | Build a union-by-sample raw-count table from multiple databases | `.tsv`, `.csv`, or `.txt` |
 | `kite sketch` | Build an exact multi-sample count table from multiple databases, then write correlation, projection-score, and clustered heatmap tables | output directory |
 | `kite citation` | Print version and citation information | stdout |
@@ -94,6 +97,12 @@ Write a count histogram:
 kite histo -i sample.kite -o sample.histo.tsv
 ```
 
+Merge multiple compatible databases:
+
+```bash
+kite merge -i sample1.kite sample2.kite sample3.kite -o merged.kite --threads 8 --mode fast
+```
+
 Prepare multi-sample sketch outputs from multiple databases:
 
 ```bash
@@ -109,10 +118,10 @@ kite sketch -i sample1.kite sample2.kite --sample-name sample_A sample_B --sampl
 | `-k` | `--kmer` | k-mer length | required | Choose the biological resolution of counting. | Changes both the biological meaning and the internal representation. Larger `k` usually increases specificity and can increase runtime or memory use. |
 | `-i` | `--input` | input FASTQ / FASTQ.GZ file | required | Point to the sequencing file you want to count. | Larger or compressed inputs increase I/O cost. Does not change the mathematical result beyond changing the dataset itself. |
 | `-o` | `--output` | output `.kite` path | required | Choose where the database should be written. | Output path and storage speed affect runtime, not the count values. |
-| `-m` | `--minimizer` | minimizer length | `15` | Tune partitioning locality. Must satisfy `1 <= m <= k` and current implementation expects `m <= 32`. | Changes internal partition behavior. It can affect speed and memory behavior, but should not change the final count table. |
 | none | `--partitions` | number of partitions | `256` | Increase when exploring higher parallel partitioning; decrease if overhead dominates. | Mainly affects speed, memory balance, and merge behavior. It should not change final counts. |
-| none | `--threads` | worker thread count | `8` | Match available CPU cores and memory bandwidth. | Directly affects runtime. Too many threads can reduce efficiency. It should not change final counts. |
+| none | `--threads` | total count-side thread budget | `8` | Match available CPU cores. Kite splits this budget across decompression and counting stages for compressed input. | Directly affects runtime and the internal pipeline split. It should not change final counts. |
 | none | `--chunk-kmers` | chunk size before sort/merge flushing | `1000000` | Increase for fewer flushes and larger working batches; decrease to reduce peak memory. | Mostly affects speed and memory footprint. It should not change final counts. |
+| none | `--max-memory-gb` | optional memory budget for adaptive buffering | auto | Set a larger value on big-memory servers to let `count` allocate deeper queues, more preallocated block buffers, and more aggressive ingestion settings. | Changes buffering strategy and throughput, not final counts. |
 | none | `--canonical` | whether to canonicalize reverse complements | `true` | Use `true` for strand-invariant counting, `false` for orientation-sensitive counting. | Changes the meaning of the result. When `true`, reverse-complement pairs are merged. |
 | `-p` | `--progress` | show lightweight progress output | `false` | Enable when you want live feedback during long runs. | Slightly increases output overhead, but is designed to stay lightweight. Does not change results. |
 | none | `--baseline` | use the slower reference pipeline | `false` | Use only for debugging, validation, or algorithm comparison. | Usually slower. Intended to preserve the same result semantics as the optimized path. |
@@ -160,6 +169,17 @@ kite sketch -i sample1.kite sample2.kite --sample-name sample_A sample_B --sampl
 | none | `--sample-name` | optional sample labels | none | Provide labels in the same order as inputs when you want custom column names. | Changes header labels only, not the numeric values. |
 | none | `--format` | output format | `tsv` | Choose `tsv`, `csv`, or `txt` depending on your downstream parser. | Changes separator style, not the underlying numeric values. |
 | `-p` | `--progress` | show lightweight progress spinner | `false` | Enable when you want visual feedback during multi-sample table generation. | Slight output overhead, no result change. |
+
+### `kite merge`
+
+| Short | Long | Meaning | Default | How To Use It | Effect On Speed And Result |
+|---|---|---|---|---|---|
+| `-i` | `--input` | two or more input `.kite` files | required | Pass compatible databases after `-i`. They must share the same `k`, the same internal storage mode, and the same canonical setting. | Changes which databases are merged. Inputs determine the final counts. |
+| `-o` | `--output` | output merged `.kite` path | required | Choose where the merged database should be written. | Output location affects runtime, not merged count semantics. |
+| none | `--threads` | worker thread count for output compression | `8` | Tune when benchmarking merged-file writing or compressing large outputs. | Affects write-time speed only. |
+| none | `--mode` | write mode | `fast` | Choose `fast`, `balanced`, or `compact` for the merged file. | Changes write-time speed and output size, not merged counts. |
+| none | `--zstd-level` | explicit Zstandard compression level | mode-dependent | Override the automatic compression level when you need tighter control over output size. | Higher levels usually reduce file size and increase CPU time. |
+| `-p` | `--progress` | show lightweight progress spinner | `false` | Enable when you want live feedback during merge. | Slight output overhead, no result change. |
 
 ### `kite sketch`
 
@@ -212,9 +232,15 @@ canonical(x) = min(x, rc(x))
 
 under lexicographic or numeric encoding order. This merges reverse-complement pairs into one count.
 
-### What is a minimizer?
+### What is direct partitioning?
 
-A minimizer is the smallest encoded `m`-mer inside a k-mer window. Kite uses minimizers to group neighboring k-mers into super-kmers, improving locality and partitioning efficiency during counting.
+In the current optimized `count` path, each encoded k-mer is sent directly to one worker-local partition based on its encoded key. This removes extra hot-path bookkeeping and keeps the main counting loop focused on:
+
+- rolling exact k-mer generation
+- direct partition routing
+- integer sorting
+- local count compaction
+- final partition-wise merge
 
 ### What is a `.kite` file?
 
@@ -231,11 +257,13 @@ The exact format definition is implemented in `src/utils/kite.rs`.
 
 ## Current Scope And Limitations
 
-- `count`, `dump`, `info`, `query`, and `histo` support all current representation modes.
+- `count`, `dump`, `info`, `query`, `histo`, and `merge` support all current representation modes.
+- `merge` currently requires all inputs to have the same `k`, the same internal representation mode, and the same canonical semantics.
 - `profile` currently operates on `u64` databases, which means it is intended for `k <= 32`.
 - `sketch` currently operates on `u64` databases, which means it is also intended for `k <= 32`.
 - `profile` writes exact integer counts, not normalized frequencies.
 - Input support is currently focused on FASTQ and FASTQ.GZ in the actively optimized path.
+- For optimized `count`, `.fastq.gz` input now uses a block-driven ingestion path. Ordinary gzip is decompressed into large byte blocks, aligned to FASTQ record boundaries, and then parsed directly inside count workers. BGZF is detected automatically and routed to a libdeflater-backed parallel BGZF block pipeline before the same record-aligned worker path.
 - `sketch` writes the exact profile table, the correlation matrix, exact PCA/t-SNE/UMAP score tables, and a clustered heatmap table directly in Rust. The generated R scripts only read those tables and plot them.
 - `sketch` also writes `sketch_sample_metadata.tsv`, which can be edited to change display labels and sample groups without rewriting the main sketch tables. Group colors are defined inside the generated R scripts.
 
@@ -250,6 +278,7 @@ src/
   info/            Metadata and statistics reporting
   query/           Exact k-mer lookup
   histo/           Count histogram generation
+  merge/           Exact database-by-database count summation
   profile/         Multi-sample raw-count union table
   sketch/          Exact multi-sample correlation/projection/heatmap table generation
   citation/        Citation text
@@ -271,6 +300,7 @@ kite count -k 31 -i sample.fastq.gz -o sample.kite --threads 8 --mode fast
 kite info -i sample.kite
 kite dump -i sample.kite -o sample.tsv -t 8
 kite histo -i sample.kite -o sample.histo.tsv
+kite merge -i sample_a.kite sample_b.kite sample_c.kite -o merged.kite --threads 8 --mode fast
 ```
 
 For multi-sample work:

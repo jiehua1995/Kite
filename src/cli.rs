@@ -70,6 +70,8 @@ pub enum Commands {
     Histo(HistoArgs),
     #[command(about = "Write a multi-sample raw-count matrix from one or more .kite files")]
     Profile(ProfileArgs),
+    #[command(about = "Merge two or more .kite files by summing exact counts into one .kite file")]
+    Merge(MergeArgs),
     #[command(about = "Create multi-sample correlation, projection, and heatmap outputs")]
     Sketch(SketchArgs),
     #[command(about = "Print version and citation information")]
@@ -89,15 +91,6 @@ pub struct CountArgs {
         required = true
     )]
     pub k: usize,
-    #[arg(
-        short = 'm',
-        long = "minimizer",
-        value_name = "M",
-        default_value_t = 15,
-        hide_default_value = true,
-        help = "Minimizer length. [Default: 15]"
-    )]
-    pub minimizer: usize,
     #[arg(
         short = 'i',
         long = "input",
@@ -138,6 +131,12 @@ pub struct CountArgs {
         help = "Chunk size in k-mers for sorting/merge. [Default: 1000000]"
     )]
     pub chunk_kmers: usize,
+    #[arg(
+        long = "max-memory-gb",
+        value_name = "GB",
+        help = "Optional memory budget in GB for adaptive count-side buffering (for example: 16 on a workstation, 128 or 192 on a large server)"
+    )]
+    pub max_memory_gb: Option<u64>,
     #[arg(long = "canonical", value_name = "true|false", default_value_t = CanonicalMode::True, hide_default_value = true, help = "Use canonical k-mers (true or false). [Default: true]", value_enum)]
     pub canonical: CanonicalMode,
     #[arg(short = 'p', long = "progress", value_name = "true|false", default_value_t = false, hide_default_value = true, help = "Show low-overhead progress (spinner). [Default: false]", value_parser = clap::value_parser!(bool))]
@@ -152,6 +151,8 @@ pub struct CountArgs {
         help = "Zstd compression level (higher = better compression, slower counting). [Default: 1 (fast mode). Optional: 1-9]"
     )]
     pub zstd_level: Option<i32>,
+    #[arg(long = "test-mode", default_value_t = false, hide = true, value_parser = clap::value_parser!(bool))]
+    pub test_mode: bool,
 }
 
 /// 中文：`kite dump` 的参数集合。它把 `.kite` 解码成文本表格。
@@ -285,6 +286,44 @@ pub struct ProfileArgs {
 /// 中文：`kite sketch` 的参数集合。它基于多个 `.kite` 生成相关性、降维和热图输入。
 /// English: Argument bundle for `kite sketch`. It builds correlation,
 /// projection, and clustered heatmap outputs from multiple `.kite` files.
+/// 中文：`kite merge` 的参数集合。它读取两个或更多 `.kite` 文件，
+/// 逐个验证兼容性后按 k-mer 精确相加，写出一个新的 `.kite` 文件。
+/// English: Argument bundle for `kite merge`. It reads two or more `.kite`
+/// files, validates compatibility, and writes one merged `.kite` file with
+/// exact summed counts.
+#[derive(Args, Debug, Clone)]
+#[command(about = "Merge two or more .kite files by summing exact counts into one .kite file")]
+pub struct MergeArgs {
+    #[arg(short = 'i', long = "input", value_name = "INPUT", required = true, num_args = 2.., help = "Input .kite files (specify two or more files after -i)")]
+    pub input: Vec<PathBuf>,
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "OUTPUT",
+        help = "Output merged .kite file (required)",
+        required = true
+    )]
+    pub output: PathBuf,
+    #[arg(
+        long = "threads",
+        value_name = "N",
+        default_value_t = 8,
+        hide_default_value = true,
+        help = "Number of worker threads for output compression. [Default: 8]"
+    )]
+    pub threads: usize,
+    #[arg(long = "mode", value_enum, default_value_t = CountWriteMode::Fast, hide_default_value = true, help = "Write mode for the merged file: fast|balanced|compact. [Default: fast]")]
+    pub mode: CountWriteMode,
+    #[arg(
+        long = "zstd-level",
+        value_name = "LEVEL",
+        help = "Optional zstd compression level for the merged file"
+    )]
+    pub zstd_level: Option<i32>,
+    #[arg(short = 'p', long = "progress", value_name = "true|false", default_value_t = false, hide_default_value = true, help = "Show a lightweight progress spinner. [Default: false]", value_parser = clap::value_parser!(bool))]
+    pub progress: bool,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct SketchArgs {
     #[arg(short = 'i', long = "input", value_name = "INPUT", required = true, num_args = 2.., help = "Input .kite files (specify two or more files after -i)")]
