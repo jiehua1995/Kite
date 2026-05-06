@@ -1,31 +1,32 @@
 [package]
 name = "kite"
-version = "0.2.0"
-edition = "2024"
+version = "0.3.0"
+edition = "2021"
+
+[[bin]]
+name = "kite"
+path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0"
-clap = { version = "4.5", features = ["derive"] }
-rand = "0.9"
-smallvec = "1.14"
-rayon = "1.10"
-fastrand = "2.3"
-zstd = { version = "0.13", features = ["zstdmt"] }
-mimalloc = { version = "0.1", default-features = false }
+clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
+flate2 = { version = "1", features = ["zlib-ng"] }
+byteorder = "1"
 memmap2 = "0.9"
-flate2 = "1.0"
+rayon = "1"
+libc = "0.2"
+num_cpus = "1"
+anyhow = "1"
+mimalloc = { version = "0.1", default-features = false }
+zstd = "0.13"
+io-uring = "0.6"
 itoa = "1"
-time = { version = "0.3", features = ["formatting"] }
-manifolds-rs = "0.1.12"
-faer = "0.23.2"
-memchr = "2.7.6"
-libdeflater = "1.25.2"
-rustc-hash = "2.1.1"
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "thin"
 codegen-units = 1
 panic = "abort"
-strip = true
+
+[profile.dev]
+opt-level = 1

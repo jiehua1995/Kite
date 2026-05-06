@@ -1,0 +1,192 @@
+=== kite k=21 count START Sat 04 Apr 2026 12:44:22 AM CEST ===
+[kite count] input:       test/HG002_sample.fastq.gz
+[kite count] compression: bgzf
+[kite count] k=21, canonical=true, partitions=256
+[kite count] mode=fast, zstd-level=1
+[kite count] threads total=48, decomp=16, count_workers=31
+[kite count] max-memory-gb=64.0, per-worker budget=1374.1MB
+[kite count] assembly:    17.652s (21.7 GB written)
+=== kite count test-mode report ===
+  input file:           test/HG002_sample.fastq.gz
+  k:                    21
+  canonical:            true
+  threads:              48
+  partitions:           256
+  chunk-kmers:          8000000
+  max-memory-gb:        64
+  ---
+  compressed bytes read:    3.84 GB
+  decompressed bytes:       22.17 GB
+  reads processed:          65,170,482
+  bases processed:          10,362,106,638
+  kmers generated:          0
+  valid kmers generated:    9,009,987,754
+  ---
+  total flushes:        8494
+  total runs:           8494
+  avg run entries:      1060747
+  run bytes written:    20.17 GB
+  ---
+  decomp time:          103194ms
+  kmer gen+push time:   376509ms  (scan_sequence + bucket push)
+  fastq parse overhead: 22401ms  (parse_ns - kmer_ns)
+  sort time:            275669ms
+  rle+ser time:         319985ms  (rle compress + entry serialisation)
+  write time:           0ms  (writer thread I/O only)
+  total wall time:      143.519s
+  peak RSS:             29113MB
+  ---
+  bucket count:         256
+  avg kmers/bucket:     35195264
+  max kmers/bucket:     52578406
+  hottest buckets:
+    bucket  131:  52578406 kmers  (0.58%)
+    bucket    0:  37574057 kmers  (0.42%)
+    bucket  152:  37314649 kmers  (0.41%)
+    bucket  176:  36768173 kmers  (0.41%)
+    bucket   72:  36499050 kmers  (0.41%)
+====================================
+	Command being timed: "./target/release/kite count -k 21 --threads 48 --max-memory-gb 64 --partitions 256 --mode fast --canonical --test-mode -i test/HG002_sample.fastq.gz -o temp/HG002_k21.kite"
+	User time (seconds): 736.54
+	System time (seconds): 1163.39
+	Percent of CPU this job got: 1291%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:27.11
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 85343608
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 42821
+	Minor (reclaiming a frame) page faults: 23646447
+	Voluntary context switches: 191871
+	Involuntary context switches: 153859
+	Swaps: 0
+	File system inputs: 4771056
+	File system outputs: 84613256
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+=== kite k=21 count END Sat 04 Apr 2026 12:46:49 AM CEST ===
+=== kite k=21 dump START Sat 04 Apr 2026 12:46:49 AM CEST ===
+[kite dump] opening: temp/HG002_k21.kite
+[kite dump] k=21, buckets=256, total_runs=8494
+[kite dump] assembly: 471.705s (48.8 GB @ 0.1 GB/s)
+=== kite dump test-mode report ===
+  input .kite:          temp/HG002_k21.kite
+  bucket count:         256
+  total runs:           8494
+  avg runs/bucket:      33.2
+  ---
+  total rows output:    2,711,890,002
+  bytes read:           20.17 GB
+  bytes written:        0 B
+  loser tree compares:  4,298,429,206
+  ---
+  merge time:           122640ms
+  text format time:     432145ms
+  write time:           0ms
+  total wall time:      484.163s
+  peak RSS:             48624MB
+===================================
+	Command being timed: "./target/release/kite dump --threads 48 --io-buf-mb 64 --test-mode -i temp/HG002_k21.kite -o temp/HG002_k21.tsv"
+	User time (seconds): 511.88
+	System time (seconds): 2063.62
+	Percent of CPU this job got: 531%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 8:04.90
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 49931304
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 11
+	Minor (reclaiming a frame) page faults: 1111947
+	Voluntary context switches: 366679
+	Involuntary context switches: 2038
+	Swaps: 0
+	File system inputs: 5320
+	File system outputs: 95327008
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+=== kite k=21 dump END Sat 04 Apr 2026 12:54:54 AM CEST ===
+=== kite k=31 count START Sat 04 Apr 2026 12:54:54 AM CEST ===
+[kite count] input:       test/HG002_sample.fastq.gz
+[kite count] compression: bgzf
+[kite count] k=31, canonical=true, partitions=256
+[kite count] mode=fast, zstd-level=1
+[kite count] threads total=48, decomp=16, count_workers=31
+[kite count] max-memory-gb=64.0, per-worker budget=1374.1MB
+[kite count] assembly:    292.810s (36.9 GB written)
+=== kite count test-mode report ===
+  input file:           test/HG002_sample.fastq.gz
+  k:                    31
+  canonical:            true
+  threads:              48
+  partitions:           256
+  chunk-kmers:          8000000
+  max-memory-gb:        64
+  ---
+  compressed bytes read:    3.84 GB
+  decompressed bytes:       22.17 GB
+  reads processed:          65,170,482
+  bases processed:          10,362,106,638
+  kmers generated:          0
+  valid kmers generated:    8,341,582,924
+  ---
+  total flushes:        8401
+  total runs:           8401
+  avg run entries:      992927
+  run bytes written:    34.36 GB
+  ---
+  decomp time:          80380ms
+  kmer gen+push time:   345592ms  (scan_sequence + bucket push)
+  fastq parse overhead: 22150ms  (parse_ns - kmer_ns)
+  sort time:            229912ms
+  rle+ser time:         369470ms  (rle compress + entry serialisation)
+  write time:           0ms  (writer thread I/O only)
+  total wall time:      481.459s
+  peak RSS:             29027MB
+  ---
+  bucket count:         256
+  avg kmers/bucket:     32584308
+  max kmers/bucket:     47096777
+  hottest buckets:
+    bucket  224:  47096777 kmers  (0.56%)
+    bucket  160:  33374892 kmers  (0.40%)
+    bucket  188:  33255762 kmers  (0.40%)
+    bucket  255:  33069346 kmers  (0.40%)
+    bucket  130:  33010268 kmers  (0.40%)
+====================================
+	Command being timed: "./target/release/kite count -k 31 --threads 48 --max-memory-gb 64 --partitions 256 --mode fast --canonical --test-mode -i test/HG002_sample.fastq.gz -o temp/HG002_k31.kite"
+	User time (seconds): 716.03
+	System time (seconds): 1956.65
+	Percent of CPU this job got: 543%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 8:11.66
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 81145992
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 31562
+	Minor (reclaiming a frame) page faults: 24516550
+	Voluntary context switches: 384694
+	Involuntary context switches: 164955
+	Swaps: 0
+	File system inputs: 4306856
+	File system outputs: 144102000
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+=== kite k=31 count END Sat 04 Apr 2026 01:03:06 AM CEST ===
+=== kite k=31 dump START Sat 04 Apr 2026 01:03:06 AM CEST ===
+[kite dump] opening: temp/HG002_k31.kite
+[kite dump] k=31, buckets=256, total_runs=8401
