@@ -1,4 +1,4 @@
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded};
 
 pub const DUMP_SLAB_BYTES: usize = 64 * 1024 * 1024; // 64 MiB per slab
 pub const DUMP_QUEUE_BYTES: usize = 4 * 1024 * 1024 * 1024; // 4 GiB write-ahead queue

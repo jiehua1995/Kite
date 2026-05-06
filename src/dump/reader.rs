@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io;
 
-use crate::format::{ChunkIndexEntry, KiteHeader, Kx2Footer, PartitionEntry};
 use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
+use crate::format::{ChunkIndexEntry, KiteHeader, Kx2Footer, PartitionEntry};
 
 /// Per-chunk location in the .kite data area.
 #[derive(Debug, Clone)]

@@ -11,8 +11,8 @@ pub mod writer;
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -23,10 +23,10 @@ use crate::count::decompress::{GzipChunkedReader, PlainChunkedReader};
 use crate::count::kmer::{KmerU256, KmerWord};
 use crate::count::memory::MemoryBudget;
 use crate::count::parser::parse_sequences;
-use crate::count::reader::{detect_compression, open_input, CompressionType};
+use crate::count::reader::{CompressionType, detect_compression, open_input};
 use crate::count::worker::CountWorker;
 use crate::count::writer::ConcurrentKiteWriter;
-use crate::format::header::{KEY_WIDTH_U128, KEY_WIDTH_U256, KEY_WIDTH_U64};
+use crate::format::header::{KEY_WIDTH_U64, KEY_WIDTH_U128, KEY_WIDTH_U256};
 use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
 use crate::runtime::{apply_process_memory_limit, resolve_memory_limit_bytes};
 use crate::stats::CountStats;
@@ -824,11 +824,7 @@ fn streaming_flush_target_bytes(
 }
 
 fn encoding_factor_for(key_width: u16) -> usize {
-    if key_width == KEY_WIDTH_U64 {
-        1
-    } else {
-        2
-    }
+    if key_width == KEY_WIDTH_U64 { 1 } else { 2 }
 }
 
 fn derive_partition_count(

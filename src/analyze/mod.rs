@@ -102,11 +102,7 @@ impl PearsonAccumulator {
         let denom_i = self.sumsq[i] - (self.sums[i] * self.sums[i] / self.rows as f64);
         let denom_j = self.sumsq[j] - (self.sums[j] * self.sums[j] / self.rows as f64);
         let denom = (denom_i.max(0.0) * denom_j.max(0.0)).sqrt();
-        if denom > 0.0 {
-            numerator / denom
-        } else {
-            0.0
-        }
+        if denom > 0.0 { numerator / denom } else { 0.0 }
     }
 
     fn write_tsv(&self, labels: &[String], path: &Path) -> anyhow::Result<()> {

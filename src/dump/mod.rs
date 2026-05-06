@@ -6,8 +6,8 @@ pub mod writer;
 
 use std::fs::File;
 use std::io::{BufWriter, IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use crate::cli::DumpArgs;
 use crate::dump::merge::stream_partition_slabs;
 use crate::dump::reader::KiteReader;
-use crate::dump::writer::{queue_slots_for, SlabPool, DUMP_QUEUE_BYTES, DUMP_SLAB_BYTES};
+use crate::dump::writer::{DUMP_QUEUE_BYTES, DUMP_SLAB_BYTES, SlabPool, queue_slots_for};
 use crate::stats::DumpStats;
 
 fn spawn_dump_progress(

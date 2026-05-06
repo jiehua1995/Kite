@@ -4,14 +4,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 
 use crate::count::kmer::{KmerIter, KmerIter128, KmerIterU256};
 use crate::dump::decoder::{decode_kmer_any, decode_kmer_u256};
 use crate::dump::reader::KiteReader;
-use crate::format::header::{KEY_WIDTH_U128, KEY_WIDTH_U256, KEY_WIDTH_U64};
+use crate::format::header::{KEY_WIDTH_U64, KEY_WIDTH_U128, KEY_WIDTH_U256};
 use crate::format::run_block::{
-    encode_dvle_u128, encode_dvle_u64, read_varint_u128, read_varint_u64,
+    encode_dvle_u64, encode_dvle_u128, read_varint_u64, read_varint_u128,
 };
 use crate::format::{CODEC_DVLE, CODEC_RAW};
 

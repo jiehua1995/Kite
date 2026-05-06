@@ -1,6 +1,6 @@
 use std::io::{self, Read};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A reusable buffer chunk. Returned to the pool after use.
 #[allow(dead_code)]

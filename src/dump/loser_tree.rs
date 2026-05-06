@@ -44,9 +44,9 @@ impl LoserTree {
         // need to store them to pull more values. Store in a side vec.
         // Re-design: store streams alongside heads.
         let _ = streams; // consumed into heads loading; we don't need more items now
-                         // NOTE: This struct doesn't pull more items — it is designed to be used
-                         // with RunCursor which provides all items upfront via a slice iterator.
-                         // For streaming, see LoserTreeStreaming below.
+        // NOTE: This struct doesn't pull more items — it is designed to be used
+        // with RunCursor which provides all items upfront via a slice iterator.
+        // For streaming, see LoserTreeStreaming below.
 
         let mut lt = LoserTree {
             heads,

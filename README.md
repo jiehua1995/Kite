@@ -1,9 +1,15 @@
-# Kite
 
-<p>
-	<img src="doc/logo.png" alt="logo" width="100" align="left">
-</p> 
-**Kite** is a high-performance Rust toolkit for exact k-mer counting, storage, inspection, and downstream multi-sample analysis.
+  <img src="doc/logo.png" alt="Kite Logo" width="120" align="left">
+  
+  # Kite
+  
+  **A high-performance K-mer counter**
+
+  [![Rust](https://img.shields.io/badge/rust-1.78+-orange.svg)](https://www.rust-lang.org)
+
+---
+
+**Kite** (K-mer indexing and throughput engine) is a high-performance Rust toolkit designed for exact k-mer counting, storage, inspection, and downstream multi-sample analysis. It leverages Rust's memory safety and performance to provide a robust engine for bioinformatics workflows.
 
 Its design goal is simple:
 
