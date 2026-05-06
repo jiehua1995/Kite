@@ -49,40 +49,6 @@ impl Iterator for MmapRunIter {
     }
 }
 
-struct OwnedRunIter {
-    data: Vec<u8>,
-    entry_count: usize,
-    entry_size: usize,
-    current: usize,
-}
-
-impl OwnedRunIter {
-    fn new(data: Vec<u8>, entry_count: usize, entry_size: usize) -> Self {
-        Self { data, entry_count, entry_size, current: 0 }
-    }
-}
-
-impl Iterator for OwnedRunIter {
-    type Item = (u128, u32);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.current >= self.entry_count {
-            return None;
-        }
-        let off = self.current * self.entry_size;
-        self.current += 1;
-        if self.entry_size == 12 {
-            let key = u64::from_le_bytes(self.data[off..off + 8].try_into().unwrap()) as u128;
-            let count = u32::from_le_bytes(self.data[off + 8..off + 12].try_into().unwrap());
-            Some((key, count))
-        } else {
-            let key = u128::from_le_bytes(self.data[off..off + 16].try_into().unwrap());
-            let count = u32::from_le_bytes(self.data[off + 16..off + 20].try_into().unwrap());
-            Some((key, count))
-        }
-    }
-}
-
 struct DvleRunIter {
     _reader: Arc<KiteReader>,
     data: *const u8,
@@ -160,13 +126,6 @@ fn build_partition_merger(
     for loc in partition_chunks {
         if loc.is_dvle() {
             streams.push(Box::new(DvleRunIter::new(Arc::clone(reader), loc, entry_size == 20)));
-        } else if loc.is_zstd() {
-            let payload = reader.run_data_for_decode(loc)?;
-            streams.push(Box::new(OwnedRunIter::new(
-                payload.into_owned(),
-                loc.row_count as usize,
-                entry_size,
-            )));
         } else {
             streams.push(Box::new(MmapRunIter::new(Arc::clone(reader), loc, entry_size)));
         }
@@ -180,6 +139,7 @@ pub fn stream_partition_slabs<F>(
     k: u8,
     entry_size: usize,
     slab_bytes: usize,
+    collect_timing: bool,
     stats: &Arc<DumpStats>,
     mut emit: F,
 ) -> std::io::Result<()>
@@ -188,20 +148,21 @@ where
 {
     let partition_chunks = &reader.partition_chunks[partition_id];
     if partition_chunks.is_empty() {
-        stats.observe_worker_ns(0);
+        if collect_timing {
+            stats.observe_worker_ns(0);
+        }
         return Ok(());
     }
 
-    let worker_start = Instant::now();
+    let worker_start = collect_timing.then(Instant::now);
     let mut kmer_buf = vec![0u8; k as usize];
 
     if entry_size == 36 {
-        let t_decode = Instant::now();
+        let t_decode = collect_timing.then(Instant::now);
         let total_entries: usize = partition_chunks.iter().map(|c| c.row_count as usize).sum();
         let mut all: Vec<(u128, u128, u32)> = Vec::with_capacity(total_entries);
         for loc in partition_chunks {
-            let payload = reader.run_data_for_decode(loc)?;
-            let slice = payload.as_ref();
+            let slice = reader.run_data_slice(loc);
             for i in 0..loc.row_count as usize {
                 let off = i * 36;
                 let lo = u128::from_le_bytes(slice[off..off + 16].try_into().unwrap());
@@ -210,13 +171,17 @@ where
                 all.push((hi, lo, cnt));
             }
         }
-        stats.add_decode_ns(t_decode.elapsed().as_nanos() as u64);
+        if let Some(t_decode) = t_decode {
+            stats.add_decode_ns(t_decode.elapsed().as_nanos() as u64);
+        }
 
-        let t_merge = Instant::now();
+        let t_merge = collect_timing.then(Instant::now);
         all.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-        stats.add_merge_ns(t_merge.elapsed().as_nanos() as u64);
+        if let Some(t_merge) = t_merge {
+            stats.add_merge_ns(t_merge.elapsed().as_nanos() as u64);
+        }
 
-        let t_format = Instant::now();
+        let t_format = collect_timing.then(Instant::now);
         let mut slab = Vec::with_capacity(slab_bytes);
         let mut slab_rows = 0u64;
         let mut i = 0usize;
@@ -239,27 +204,35 @@ where
         if !slab.is_empty() {
             emit(slab, slab_rows)?;
         }
-        stats.add_format_ns(t_format.elapsed().as_nanos() as u64);
+        if let Some(t_format) = t_format {
+            stats.add_format_ns(t_format.elapsed().as_nanos() as u64);
+        }
     } else {
-        let t_decode = Instant::now();
+        let t_decode = collect_timing.then(Instant::now);
         let mut merger = build_partition_merger(partition_chunks, reader, entry_size)?;
-        stats.add_decode_ns(t_decode.elapsed().as_nanos() as u64);
+        if let Some(t_decode) = t_decode {
+            stats.add_decode_ns(t_decode.elapsed().as_nanos() as u64);
+        }
 
         let mut merge_ns = 0u64;
         let mut format_ns = 0u64;
         let mut slab = Vec::with_capacity(slab_bytes);
         let mut slab_rows = 0u64;
         loop {
-            let t_merge = Instant::now();
+            let t_merge = collect_timing.then(Instant::now);
             let next = merger.next_min();
-            merge_ns += t_merge.elapsed().as_nanos() as u64;
+            if let Some(t_merge) = t_merge {
+                merge_ns += t_merge.elapsed().as_nanos() as u64;
+            }
             let Some((key, count)) = next else { break; };
 
-            let t_format = Instant::now();
+            let t_format = collect_timing.then(Instant::now);
             decode_kmer_any(key, k, &mut kmer_buf);
             format_tsv_line(&kmer_buf, count, &mut slab);
             slab_rows += 1;
-            format_ns += t_format.elapsed().as_nanos() as u64;
+            if let Some(t_format) = t_format {
+                format_ns += t_format.elapsed().as_nanos() as u64;
+            }
 
             if slab.len() >= slab_bytes {
                 emit(std::mem::replace(&mut slab, Vec::with_capacity(slab_bytes)), slab_rows)?;
@@ -269,10 +242,14 @@ where
         if !slab.is_empty() {
             emit(slab, slab_rows)?;
         }
-        stats.add_merge_ns(merge_ns);
-        stats.add_format_ns(format_ns);
+        if collect_timing {
+            stats.add_merge_ns(merge_ns);
+            stats.add_format_ns(format_ns);
+        }
     }
 
-    stats.observe_worker_ns(worker_start.elapsed().as_nanos() as u64);
+    if let Some(worker_start) = worker_start {
+        stats.observe_worker_ns(worker_start.elapsed().as_nanos() as u64);
+    }
     Ok(())
 }

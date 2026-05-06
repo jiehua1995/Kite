@@ -7,17 +7,6 @@ pub enum CountMode {
     Compact,
 }
 
-impl CountMode {
-    #[inline]
-    pub fn zstd_level(self) -> i32 {
-        match self {
-            CountMode::Fast => 0, // Disabled in Fast mode for max speed
-            CountMode::Balanced => 1,
-            CountMode::Compact => 5,
-        }
-    }
-}
-
 #[derive(Parser, Debug)]
 #[command(name = "kite", about = "High-performance k-mer counter", version)]
 pub struct Cli {
@@ -56,7 +45,7 @@ pub struct CountArgs {
     pub partitions: usize,
 
     /// K-mers per chunk (controls batch size, flush frequency, and run granularity)
-    #[arg(long = "chunk-kmers", default_value_t = 16_000_000)]
+    #[arg(long = "chunk-kmers", default_value_t = 8_000_000)]
     pub chunk_kmers: usize,
 
     /// Maximum memory budget in GB (must truly affect buffer sizes and flush strategy)
@@ -75,12 +64,12 @@ pub struct CountArgs {
     #[arg(long = "test-mode")]
     pub test_mode: bool,
 
-    /// Output mode: fast(1) / balanced(5) / compact(9) zstd compression level
+    /// Output mode hint. Current Plan04 baseline uses DVLE-only for u64/u128 hot paths.
     #[arg(long = "mode", value_enum, default_value_t = CountMode::Fast)]
     pub mode: CountMode,
 
-    /// I/O buffer size in MB for the .kite write buffer (larger = fewer syscalls)
-    #[arg(long = "io-buf-mb", default_value_t = 64)]
+    /// Per-partition staging buffer in MB for .kite pwrite batching (clamped to 16-32 MB)
+    #[arg(long = "io-buf-mb", default_value_t = 16)]
     pub io_buf_mb: usize,
 }
 

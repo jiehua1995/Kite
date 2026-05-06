@@ -1,6 +1,6 @@
 [package]
 name = "kite"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 
 [[bin]]
@@ -18,7 +18,6 @@ libc = "0.2"
 num_cpus = "1"
 anyhow = "1"
 mimalloc = { version = "0.1", default-features = false }
-zstd = "0.13"
 io-uring = "0.6"
 itoa = "1"
 

@@ -1,17 +1,15 @@
 use std::io;
 use std::fs::File;
-use std::borrow::Cow;
 use memmap2::Mmap;
 
 use crate::format::{KiteHeader, ChunkIndexEntry, PartitionEntry, Kx2Footer};
-use crate::format::{CODEC_DVLE, CODEC_ZSTD};
+use crate::format::CODEC_DVLE;
 
 /// Per-chunk location in the .kite data area.
 #[derive(Debug, Clone)]
 pub struct ChunkLocation {
     pub file_offset: u64,
     pub payload_len: usize,
-    pub raw_bytes: u64,
     pub codec: u32,
     pub row_count: u64,
     #[allow(dead_code)]
@@ -25,10 +23,6 @@ pub struct ChunkLocation {
 }
 
 impl ChunkLocation {
-    #[inline]
-    pub fn is_zstd(&self) -> bool {
-        self.codec & CODEC_ZSTD != 0
-    }
     #[allow(dead_code)]
     #[inline]
     pub fn is_dvle(&self) -> bool {
@@ -117,10 +111,15 @@ impl KiteReader {
                     return Err(io::Error::new(io::ErrorKind::InvalidData,
                         format!("partition {} chunk out of bounds", b)));
                 }
+                if e.codec & !(CODEC_DVLE | crate::format::CODEC_RAW) != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("partition {} chunk uses unsupported codec mask {:#x}", b, e.codec),
+                    ));
+                }
                 chunks.push(ChunkLocation {
                     file_offset: e.file_offset,
                     payload_len: encoded_bytes,
-                    raw_bytes: e.raw_bytes,
                     codec: e.codec,
                     row_count: e.row_count,
                     key_min_lo: e.key_min_lo,
@@ -147,23 +146,5 @@ impl KiteReader {
         let start = loc.file_offset as usize;
         let len = loc.payload_len;
         &self.mmap[start..start + len]
-    }
-
-    pub fn run_data_for_decode<'a>(&'a self, loc: &ChunkLocation) -> io::Result<Cow<'a, [u8]>> {
-        let payload = self.run_data_slice(loc);
-        if !loc.is_zstd() {
-            return Ok(Cow::Borrowed(payload));
-        }
-
-        let expected = loc.raw_bytes as usize;
-        let decoded = zstd::bulk::decompress(payload, expected)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("zstd decompress failed: {e}")))?;
-        if decoded.len() != expected {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("decoded payload size mismatch: got {}, expected {}", decoded.len(), expected),
-            ));
-        }
-        Ok(Cow::Owned(decoded))
     }
 }

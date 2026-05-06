@@ -52,18 +52,16 @@ impl MemoryBudget {
         self.current.load(Ordering::Relaxed) >= self.limit
     }
 
-    /// Budget per worker for their local bucket buffers (flush threshold).
-    ///
-    /// With the direct-write architecture (no channel), workers write sorted+RLE
-    /// runs directly to per-bucket temp files.  There is no in-channel memory to
-    /// account for, so we can safely use a large fraction of the total budget.
-    ///
-    /// 65% of total limit / n_workers: at 64 GB / 30 workers this is ~1.4 GB/worker.
-    /// The remaining 35% covers BGZF decompression queue, encoding scratch buffers,
-    /// allocator fragmentation, and OS cache overhead.
-    pub fn worker_budget_bytes(&self, num_workers: usize) -> usize {
-        let worker_total = (self.limit as f64 * 0.65) as usize;
-        worker_total / num_workers.max(1)
+    pub fn worker_budget_bytes_strict(
+        &self,
+        num_workers: usize,
+        reserved_bytes: usize,
+        worker_fraction: f64,
+        min_per_worker_bytes: usize,
+    ) -> usize {
+        let usable = self.limit.saturating_sub(reserved_bytes);
+        let worker_total = (usable as f64 * worker_fraction.clamp(0.05, 0.95)) as usize;
+        (worker_total / num_workers.max(1)).max(min_per_worker_bytes)
     }
 
     pub fn limit(&self) -> usize { self.limit }

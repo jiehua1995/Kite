@@ -35,9 +35,11 @@ struct ShardOutput {
 pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     let n_threads = if args.threads == 0 { num_cpus::get() } else { args.threads };
     let slab_bytes = (args.io_buf_mb.max(1) * 1024 * 1024).max(128 * 1024);
+    let collect_timing = args.test_mode;
 
     let wall_start = Instant::now();
-    let stats = Arc::new(DumpStats::new());
+    let stats = Arc::new(DumpStats::new(collect_timing));
+    let collect_timing = stats.timing_enabled();
     let reader = Arc::new(KiteReader::open(&args.input)?);
 
     let k = reader.header.k;
@@ -99,7 +101,7 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
                 .map(|c| c.payload_len as u64)
                 .sum();
             stats.add_read(read_bytes);
-            stream_partition_slabs(partition_id, &reader, k, entry_size, slab_bytes, &stats, |bytes, rows| {
+            stream_partition_slabs(partition_id, &reader, k, entry_size, slab_bytes, collect_timing, &stats, |bytes, rows| {
                 out.write_all(&bytes)?;
                 stats.add_rows(rows);
                 stats.add_written(bytes.len() as u64);
@@ -150,10 +152,12 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
                         .sum();
                     stats_work.add_read(read_bytes);
 
-                    stream_partition_slabs(partition_id, &reader_work, k, entry_size, slab_bytes, &stats_work, |bytes, rows| {
-                        let t_write = Instant::now();
+                    stream_partition_slabs(partition_id, &reader_work, k, entry_size, slab_bytes, collect_timing, &stats_work, |bytes, rows| {
+                        let t_write = collect_timing.then(Instant::now);
                         out.write_all(&bytes)?;
-                        stats_work.add_writer_io_ns(t_write.elapsed().as_nanos() as u64);
+                        if let Some(t_write) = t_write {
+                            stats_work.add_writer_io_ns(t_write.elapsed().as_nanos() as u64);
+                        }
                         stats_work.add_rows(rows);
                         stats_work.add_written(bytes.len() as u64);
                         Ok(())
@@ -177,7 +181,7 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     let mut outputs = outputs;
     outputs.sort_unstable_by_key(|shard| shard.shard_id);
 
-    let t_concat = Instant::now();
+    let t_concat = collect_timing.then(Instant::now);
     let final_out = File::create(&output_path)?;
     for shard in &outputs {
         let shard_in = File::open(&shard.path)
@@ -186,7 +190,9 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("sendfile shard '{}': {}", shard.path, e))?;
         let _ = std::fs::remove_file(&shard.path);
     }
-    stats.add_concat_ns(t_concat.elapsed().as_nanos() as u64);
+    if let Some(t_concat) = t_concat {
+        stats.add_concat_ns(t_concat.elapsed().as_nanos() as u64);
+    }
 
     if args.progress {
         eprintln!("  [dump] sendfile concat done");
@@ -206,23 +212,24 @@ fn build_shard_plans(reader: &KiteReader, requested_shards: usize) -> Vec<ShardP
     if partition_count == 0 {
         return Vec::new();
     }
-    
+
     let shard_count = requested_shards.clamp(1, partition_count);
+
     let total_bytes: u64 = reader.partition_entries.iter().map(|p| p.data_bytes).sum();
     let target_bytes = ((total_bytes + shard_count as u64 - 1) / shard_count as u64).max(1);
     let mut plans = Vec::with_capacity(shard_count);
     let mut start = 0usize;
-    
+
     for shard_id in 0..shard_count {
         if start >= partition_count {
             break;
         }
-    
+
         let remaining_shards = shard_count - shard_id;
         let max_end = partition_count - (remaining_shards - 1);
         let mut end = start;
         let mut bytes = 0u64;
-    
+
         while end < max_end {
             let next_bytes = reader.partition_entries[end].data_bytes;
             if end > start && bytes >= target_bytes {
@@ -231,12 +238,12 @@ fn build_shard_plans(reader: &KiteReader, requested_shards: usize) -> Vec<ShardP
             bytes += next_bytes;
             end += 1;
         }
-    
+
         if end == start {
             bytes = reader.partition_entries[start].data_bytes;
             end = start + 1;
         }
-    
+
         plans.push(ShardPlan {
             shard_id,
             start_partition: start,
@@ -245,6 +252,6 @@ fn build_shard_plans(reader: &KiteReader, requested_shards: usize) -> Vec<ShardP
         });
         start = end;
     }
-    
+
     plans
 }

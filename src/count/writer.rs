@@ -2,8 +2,9 @@ use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use crate::count::memory::SharedBudget;
 use crate::format::{ChunkIndexEntry, KiteHeader, Kx2Footer, PartitionEntry};
 
 #[derive(Debug, Clone)]
@@ -19,25 +20,75 @@ pub struct ChunkMeta {
     pub key_max_hi: u128,
 }
 
+#[derive(Debug, Clone)]
+struct PendingChunkMeta {
+    relative_offset: u64,
+    row_count: u64,
+    codec: u32,
+    encoded_bytes: u64,
+    raw_bytes: u64,
+    key_min_lo: u128,
+    key_min_hi: u128,
+    key_max_lo: u128,
+    key_max_hi: u128,
+}
+
+#[derive(Default)]
+struct PartitionStaging {
+    buffer: Vec<u8>,
+    pending_chunks: Vec<PendingChunkMeta>,
+    committed_chunks: Vec<ChunkMeta>,
+    capacity_reserved: bool,
+}
+
 pub struct ConcurrentKiteWriter {
     file: File,
+    budget: SharedBudget,
     k: u8,
     canonical: bool,
     partitions: usize,
     key_width: u16,
     codec_mask: u16,
+    staging_bytes: usize,
+    staged_high_watermark: usize,
+    staged_low_watermark: usize,
     next_data_offset: AtomicU64,
-    partition_chunks: Vec<Mutex<Vec<ChunkMeta>>>,
+    staged_bytes: AtomicUsize,
+    partition_staging: Vec<Mutex<PartitionStaging>>,
+    write_lanes: Vec<Mutex<()>>,
 }
 
 impl ConcurrentKiteWriter {
+    pub const MIN_STAGING_BYTES: usize = 16 * 1024 * 1024;
+    pub const MAX_STAGING_BYTES: usize = 32 * 1024 * 1024;
+
+    pub fn clamp_staging_bytes(io_buf_mb: usize) -> usize {
+        io_buf_mb
+            .clamp(
+                Self::MIN_STAGING_BYTES / (1024 * 1024),
+                Self::MAX_STAGING_BYTES / (1024 * 1024),
+            )
+            .saturating_mul(1024 * 1024)
+    }
+
+    pub fn staging_reservation_bytes(partitions: usize, staging_bytes: usize) -> usize {
+        partitions.saturating_mul(staging_bytes)
+    }
+
+    pub fn suggest_write_lanes(n_workers: usize) -> usize {
+        n_workers.div_ceil(8).clamp(2, 6)
+    }
+
     pub fn create(
         output_path: &str,
+        budget: SharedBudget,
         k: u8,
         canonical: bool,
         partitions: usize,
         key_width: u16,
         codec_mask: u16,
+        staging_bytes: usize,
+        write_lane_count: usize,
     ) -> io::Result<Self> {
         let mut file = File::create(output_path)?;
         let header = KiteHeader::new(k, canonical, partitions as u32, key_width, codec_mask);
@@ -48,16 +99,140 @@ impl ConcurrentKiteWriter {
         }
         file.write_all(&header_buf)?;
 
+        let lane_count = write_lane_count.clamp(1, partitions.max(1));
+        let high_watermark = staging_bytes.saturating_mul(lane_count.saturating_mul(4)).max(staging_bytes);
+        let low_watermark = high_watermark / 2;
+
         Ok(Self {
             file,
+            budget,
             k,
             canonical,
             partitions,
             key_width,
             codec_mask,
+            staging_bytes,
+            staged_high_watermark: high_watermark,
+            staged_low_watermark: low_watermark,
             next_data_offset: AtomicU64::new(KiteHeader::SIZE as u64),
-            partition_chunks: (0..partitions).map(|_| Mutex::new(Vec::new())).collect(),
+            staged_bytes: AtomicUsize::new(0),
+            partition_staging: (0..partitions)
+                .map(|_| Mutex::new(PartitionStaging::default()))
+                .collect(),
+            write_lanes: (0..lane_count).map(|_| Mutex::new(())).collect(),
         })
+    }
+
+    #[inline]
+    fn lane_index(&self, partition_id: usize) -> usize {
+        partition_id % self.write_lanes.len().max(1)
+    }
+
+    #[inline]
+    pub fn current_staged_bytes(&self) -> usize {
+        self.staged_bytes.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn needs_runtime_drain(&self) -> bool {
+        self.current_staged_bytes() >= self.staged_high_watermark
+    }
+
+    fn reserve_partition_capacity(&self, staging: &mut PartitionStaging) {
+        if !staging.capacity_reserved {
+            staging.buffer.reserve_exact(self.staging_bytes);
+            staging.capacity_reserved = true;
+            self.budget.alloc(self.staging_bytes);
+        }
+    }
+
+    fn write_all_at(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+        let mut written = 0usize;
+        while written < data.len() {
+            let n = self.file.write_at(&data[written..], offset + written as u64)?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "write_at returned 0"));
+            }
+            written += n;
+        }
+        Ok(())
+    }
+
+    fn flush_partition_locked(
+        &self,
+        partition_id: usize,
+        staging: &mut PartitionStaging,
+    ) -> io::Result<()> {
+        if staging.buffer.is_empty() {
+            return Ok(());
+        }
+
+        let _lane = self.write_lanes[self.lane_index(partition_id)].lock().unwrap();
+        let flush_len = staging.buffer.len();
+        let offset = self
+            .next_data_offset
+            .fetch_add(flush_len as u64, Ordering::Relaxed);
+        self.write_all_at(offset, &staging.buffer)?;
+        self.staged_bytes.fetch_sub(flush_len, Ordering::Relaxed);
+
+        for pending in staging.pending_chunks.drain(..) {
+            staging.committed_chunks.push(ChunkMeta {
+                file_offset: offset + pending.relative_offset,
+                row_count: pending.row_count,
+                codec: pending.codec,
+                encoded_bytes: pending.encoded_bytes,
+                raw_bytes: pending.raw_bytes,
+                key_min_lo: pending.key_min_lo,
+                key_min_hi: pending.key_min_hi,
+                key_max_lo: pending.key_max_lo,
+                key_max_hi: pending.key_max_hi,
+            });
+        }
+        staging.buffer.clear();
+        Ok(())
+    }
+
+    pub fn drain_one_partition(&self) -> io::Result<bool> {
+        let mut best_partition = None;
+        let mut best_bytes = 0usize;
+
+        for partition_id in 0..self.partitions {
+            let Ok(staging) = self.partition_staging[partition_id].try_lock() else {
+                continue;
+            };
+            let staged = staging.buffer.len();
+            if staged > best_bytes {
+                best_bytes = staged;
+                best_partition = Some(partition_id);
+            }
+        }
+
+        let Some(partition_id) = best_partition else {
+            return Ok(false);
+        };
+
+        let mut staging = self.partition_staging[partition_id].lock().unwrap();
+        if staging.buffer.is_empty() {
+            return Ok(false);
+        }
+        self.flush_partition_locked(partition_id, &mut staging)?;
+        Ok(true)
+    }
+
+    pub fn drain_excess_staging(&self) -> io::Result<bool> {
+        let mut drained_any = false;
+        let mut attempts = 0usize;
+        let max_attempts = self.write_lanes.len().saturating_mul(2).max(1);
+
+        while self.current_staged_bytes() > self.staged_low_watermark && attempts < max_attempts {
+            if !self.drain_one_partition()? {
+                break;
+            }
+            drained_any = true;
+            attempts += 1;
+        }
+
+        Ok(drained_any)
     }
 
     pub fn append_chunk(
@@ -72,40 +247,70 @@ impl ConcurrentKiteWriter {
         key_max_hi: u128,
         data: &[u8],
     ) -> io::Result<()> {
-        let offset = self.next_data_offset.fetch_add(data.len() as u64, Ordering::Relaxed);
-        let mut written = 0usize;
-        while written < data.len() {
-            let n = self.file.write_at(&data[written..], offset + written as u64)?;
-            if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "write_at returned 0"));
+        {
+            let mut staging = self.partition_staging[partition_id].lock().unwrap();
+            self.reserve_partition_capacity(&mut staging);
+
+            if !staging.buffer.is_empty() && staging.buffer.len() + data.len() > self.staging_bytes {
+                self.flush_partition_locked(partition_id, &mut staging)?;
             }
-            written += n;
+
+            if data.len() >= self.staging_bytes {
+                let _lane = self.write_lanes[self.lane_index(partition_id)].lock().unwrap();
+                let offset = self.next_data_offset.fetch_add(data.len() as u64, Ordering::Relaxed);
+                self.write_all_at(offset, data)?;
+                staging.committed_chunks.push(ChunkMeta {
+                    file_offset: offset,
+                    row_count,
+                    codec,
+                    encoded_bytes: data.len() as u64,
+                    raw_bytes,
+                    key_min_lo,
+                    key_min_hi,
+                    key_max_lo,
+                    key_max_hi,
+                });
+                return Ok(());
+            }
+
+            let relative_offset = staging.buffer.len() as u64;
+            staging.buffer.extend_from_slice(data);
+            staging.pending_chunks.push(PendingChunkMeta {
+                relative_offset,
+                row_count,
+                codec,
+                encoded_bytes: data.len() as u64,
+                raw_bytes,
+                key_min_lo,
+                key_min_hi,
+                key_max_lo,
+                key_max_hi,
+            });
+            self.staged_bytes.fetch_add(data.len(), Ordering::Relaxed);
+
+            if staging.buffer.len() >= self.staging_bytes {
+                self.flush_partition_locked(partition_id, &mut staging)?;
+            }
         }
 
-        let mut partition = self.partition_chunks[partition_id].lock().unwrap();
-        partition.push(ChunkMeta {
-            file_offset: offset,
-            row_count,
-            codec,
-            encoded_bytes: data.len() as u64,
-            raw_bytes,
-            key_min_lo,
-            key_min_hi,
-            key_max_lo,
-            key_max_hi,
-        });
+        if self.needs_runtime_drain() {
+            let _ = self.drain_excess_staging()?;
+        }
+
         Ok(())
     }
 
     pub fn finalize(&mut self) -> io::Result<FinalizeSummary> {
-        let data_end = self.next_data_offset.load(Ordering::Relaxed);
-
         let mut all_chunks: Vec<Vec<ChunkMeta>> = Vec::with_capacity(self.partitions);
-        for partition in &self.partition_chunks {
-            let mut chunks = partition.lock().unwrap().clone();
+        for (partition_id, partition) in self.partition_staging.iter().enumerate() {
+            let mut staging = partition.lock().unwrap();
+            self.flush_partition_locked(partition_id, &mut staging)?;
+            let mut chunks = std::mem::take(&mut staging.committed_chunks);
             chunks.sort_unstable_by_key(|chunk| chunk.file_offset);
             all_chunks.push(chunks);
         }
+
+        let data_end = self.next_data_offset.load(Ordering::Relaxed);
 
         let total_chunks: u64 = all_chunks.iter().map(|chunks| chunks.len() as u64).sum();
         let total_rows: u64 = all_chunks

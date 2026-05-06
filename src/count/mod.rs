@@ -25,7 +25,7 @@ use crate::count::writer::ConcurrentKiteWriter;
 use crate::count::worker::CountWorker;
 use crate::count::kmer::{KmerWord, KmerU256};
 use crate::format::header::{KEY_WIDTH_U128, KEY_WIDTH_U256, KEY_WIDTH_U64};
-use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
+use crate::format::{CODEC_DVLE, CODEC_RAW};
 
 /// Return log2(partitions) — the number of bucket index bits for Fibonacci hash routing.
 pub fn compute_bucket_bits(partitions: usize) -> u32 {
@@ -62,7 +62,7 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
         20 => KEY_WIDTH_U128,
         _  => KEY_WIDTH_U64,
     };
-    let codec_mask: u16 = (CODEC_RAW | CODEC_DVLE | CODEC_ZSTD) as u16;
+    let codec_mask: u16 = (CODEC_RAW | CODEC_DVLE) as u16;
 
     let n_threads = if args.threads == 0 { num_cpus::get() } else { args.threads };
 
@@ -74,7 +74,7 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     }
 
     let budget = Arc::new(MemoryBudget::new(args.max_memory_gb));
-    let stats = Arc::new(CountStats::new(args.partitions));
+    let stats = Arc::new(CountStats::new(args.partitions, args.test_mode));
 
     let compression = detect_compression(Path::new(&args.input))?;
 
@@ -83,9 +83,7 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     // Allocate one extra thread for the reader.
     let (n_decomp, n_workers) = match compression {
         CompressionType::Bgzf => {
-            // Fewer decomp threads: BGZF decompression is fast (~500 MB/s/thread).
-            // Giving more threads to workers improves radix-sort throughput.
-            let d = (n_threads / 4).max(1).min(12);
+            let d = (n_threads / 3).max(1).min(16);
             let w = (n_threads.saturating_sub(d + 1)).max(1); // +1 for reader
             (d, w)
         }
@@ -100,18 +98,16 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
         eprintln!("[kite count] compression: {}", compression);
         eprintln!("[kite count] k={}, canonical={}, partitions={}",
             args.k, args.canonical, args.partitions);
-        eprintln!("[kite count] mode={}, zstd-level={}",
+        eprintln!("[kite count] mode={}, codec={}",
             match args.mode {
                 crate::cli::CountMode::Fast => "fast",
                 crate::cli::CountMode::Balanced => "balanced",
                 crate::cli::CountMode::Compact => "compact",
             },
-            args.mode.zstd_level());
+            if K::entry_size() == 36 { "raw-u256" } else { "dvle-only" });
         eprintln!("[kite count] threads total={}, decomp={}, count_workers={}",
             n_threads, n_decomp, n_workers);
-        eprintln!("[kite count] max-memory-gb={:.1}, per-worker budget={:.1}MB",
-            args.max_memory_gb,
-            budget.worker_budget_bytes(n_workers) as f64 / 1024.0 / 1024.0);
+        eprintln!("[kite count] max-memory-gb={:.1}", args.max_memory_gb);
     }
 
     let wall_start = Instant::now();
@@ -125,7 +121,19 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
 
     let (chunk_tx, chunk_rx) = bounded::<Vec<u8>>(queue_depth);
 
-    let worker_budget = budget.worker_budget_bytes(n_workers);
+    let staging_bytes = ConcurrentKiteWriter::clamp_staging_bytes(args.io_buf_mb);
+    let staging_reservation = ConcurrentKiteWriter::staging_reservation_bytes(args.partitions, staging_bytes);
+    let writer_lanes = ConcurrentKiteWriter::suggest_write_lanes(n_workers);
+    let worker_scratch_reservation = n_workers.saturating_mul(128 * 1024 * 1024);
+    let reserved_bytes = staging_reservation
+        .saturating_add(decomp_budget)
+        .saturating_add(worker_scratch_reservation);
+    let worker_budget = budget.worker_budget_bytes_strict(
+        n_workers,
+        reserved_bytes,
+        0.43,
+        128 * 1024 * 1024,
+    );
     let bucket_shift = compute_bucket_bits(args.partitions);
 
     // Copy args for threads / writer setup
@@ -135,16 +143,37 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     let partitions       = args.partitions;
     let compression_type = compression;
     let _show_progress   = args.progress;
-    let zstd_level       = args.mode.zstd_level();
-
     let output_path = args.output.clone();
+    let collect_timing = args.test_mode;
+
+    if reserved_bytes >= budget.limit() {
+        anyhow::bail!(
+            "count reserves {} bytes exceed --max-memory-gb budget {} bytes",
+            reserved_bytes,
+            budget.limit()
+        );
+    }
+
+    if args.test_mode {
+        eprintln!(
+            "[kite count] staging={}MB, writer_lanes={}, decomp_budget={:.1}MB, worker_budget={:.1}MB",
+            staging_bytes / 1024 / 1024,
+            writer_lanes,
+            decomp_budget as f64 / 1024.0 / 1024.0,
+            worker_budget as f64 / 1024.0 / 1024.0,
+        );
+    }
+
     let kite_writer = Arc::new(ConcurrentKiteWriter::create(
         &output_path,
+        Arc::clone(&budget),
         k,
         canonical,
         partitions,
         key_width,
         codec_mask,
+        staging_bytes,
+        writer_lanes,
     )?);
 
     // ─── Reader / Decompress Thread ───────────────────────────────────────────
@@ -153,13 +182,15 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     let reader_thread = thread::spawn(move || {
         match compression_type {
             CompressionType::Bgzf => {
-                let t = Instant::now();
+                let t = collect_timing.then(Instant::now);
                 match bgzf::decompress_bgzf_parallel(
                     &input_path, n_decomp, chunk_size_bytes, &chunk_tx_reader,
                 ) {
                     Ok((comp_bytes, decomp_bytes)) => {
                         stats_reader.add_comp_bytes(comp_bytes);
-                        stats_reader.add_decomp_ns(t.elapsed().as_nanos() as u64);
+                        if let Some(t) = t {
+                            stats_reader.add_decomp_ns(t.elapsed().as_nanos() as u64);
+                        }
                         let _ = decomp_bytes;
                     }
                     Err(e) => eprintln!("[BGZF decomp error] {}", e),
@@ -173,10 +204,12 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
                 let buffered = std::io::BufReader::with_capacity(2 * 1024 * 1024, file);
                 let mut reader = GzipChunkedReader::new(buffered, chunk_size_bytes);
                 loop {
-                    let t = Instant::now();
+                    let t = collect_timing.then(Instant::now);
                     match reader.next_chunk() {
                         Ok(Some(chunk)) => {
-                            stats_reader.add_decomp_ns(t.elapsed().as_nanos() as u64);
+                            if let Some(t) = t {
+                                stats_reader.add_decomp_ns(t.elapsed().as_nanos() as u64);
+                            }
                             if chunk_tx_reader.send(chunk).is_err() { break; }
                         }
                         Ok(None) => break,
@@ -213,10 +246,10 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
 
         let handle = thread::spawn(move || -> std::io::Result<()> {
             let mut worker = CountWorker::<K>::new(
+                collect_timing,
                 k, canonical, partitions, bucket_shift,
                 budget_w, stats_w,
                 kite_writer_w,
-                zstd_level,
                 worker_budget,
             );
             for chunk in chunk_rx_w.iter() {
@@ -237,16 +270,18 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
         }
     }
 
-    let t_finalize = Instant::now();
+    let t_finalize = collect_timing.then(Instant::now);
     let finalize_summary = Arc::into_inner(kite_writer)
         .ok_or_else(|| anyhow::anyhow!("count writer still has outstanding references"))?
         .finalize()?;
-    let finalize_secs = t_finalize.elapsed().as_secs_f64();
+    let finalize_secs = t_finalize.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
     stats.set_partition_segment_distribution(
         finalize_summary.hottest_partition_segments,
         finalize_summary.least_partition_segments,
     );
-    stats.add_finalize_ns(t_finalize.elapsed().as_nanos() as u64);
+    if let Some(t_finalize) = t_finalize {
+        stats.add_finalize_ns(t_finalize.elapsed().as_nanos() as u64);
+    }
 
     let wall = wall_start.elapsed();
 

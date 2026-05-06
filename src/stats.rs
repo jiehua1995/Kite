@@ -6,6 +6,7 @@ use std::time::Duration;
 /// Uses atomics for fields updated across threads.
 #[derive(Default)]
 pub struct CountStats {
+    timing_enabled: bool,
     pub reads_processed: AtomicU64,
     pub bases_processed: AtomicU64,
     pub kmers_generated: AtomicU64,
@@ -34,11 +35,17 @@ pub struct CountStats {
 
 #[allow(dead_code)]
 impl CountStats {
-    pub fn new(partitions: usize) -> Self {
+    pub fn new(partitions: usize, timing_enabled: bool) -> Self {
         let mut s = CountStats::default();
+        s.timing_enabled = timing_enabled;
         s.bucket_kmer_counts = (0..partitions).map(|_| AtomicU64::new(0)).collect();
         s.bucket_run_counts  = (0..partitions).map(|_| AtomicU64::new(0)).collect();
         s
+    }
+
+    #[inline]
+    pub fn timing_enabled(&self) -> bool {
+        self.timing_enabled
     }
 
     pub fn add_reads(&self, n: u64)  { self.reads_processed.fetch_add(n, Ordering::Relaxed); }
@@ -215,6 +222,7 @@ pub type SharedStats = Arc<CountStats>;
 /// Statistics collected during `kite dump`.
 #[derive(Default)]
 pub struct DumpStats {
+    timing_enabled: bool,
     pub total_rows: AtomicU64,
     pub bytes_read: AtomicU64,
     pub bytes_written: AtomicU64,
@@ -238,7 +246,16 @@ pub struct DumpStats {
 }
 
 impl DumpStats {
-    pub fn new() -> Self { DumpStats::default() }
+    pub fn new(timing_enabled: bool) -> Self {
+        let mut stats = DumpStats::default();
+        stats.timing_enabled = timing_enabled;
+        stats
+    }
+
+    #[inline]
+    pub fn timing_enabled(&self) -> bool {
+        self.timing_enabled
+    }
 
     pub fn add_rows(&self, n: u64)   { self.total_rows.fetch_add(n, Ordering::Relaxed); }
     pub fn add_read(&self, n: u64)   { self.bytes_read.fetch_add(n, Ordering::Relaxed); }

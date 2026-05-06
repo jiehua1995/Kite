@@ -1,6 +1,5 @@
 pub const CODEC_RAW: u32 = 0x01;
 pub const CODEC_DVLE: u32 = 0x02;
-pub const CODEC_ZSTD: u32 = 0x04;
 #[allow(dead_code)]
 pub const CODEC_FOR_DELTA: u32 = 0x08;
 

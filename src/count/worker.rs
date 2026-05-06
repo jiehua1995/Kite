@@ -7,7 +7,7 @@ use crate::count::sorter::rle_compress_typed;
 use crate::count::memory::SharedBudget;
 use crate::count::writer::ConcurrentKiteWriter;
 use crate::stats::{SharedStats, LocalCountStats};
-use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
+use crate::format::{CODEC_DVLE, CODEC_RAW};
 
 /// Size of each per-bucket staging slot (entries).  With K=u64 (8 B) and
 /// 256 buckets: 256 × 64 × 8 = 131 072 B ≈ 128 KB — fits in L2 cache.
@@ -26,6 +26,7 @@ const WCOM_BATCH: usize = 64;
 /// 5. Direct bucket-file write: workers lock bucket_files[b], write RunHeader+payload,
 ///    unlock.  Lock contention is low (different workers hit different buckets).
 pub struct CountWorker<K: KmerWord> {
+    collect_timing: bool,
     k: u8,
     canonical: bool,
     partitions: usize,
@@ -37,7 +38,6 @@ pub struct CountWorker<K: KmerWord> {
     stats: SharedStats,
     local_stats: LocalCountStats,
     kite_writer: Arc<ConcurrentKiteWriter>,
-    zstd_level: i32,
     byte_buf: Vec<u8>,
     entries_buf: Vec<(K, u32)>,
     
@@ -49,6 +49,7 @@ pub struct CountWorker<K: KmerWord> {
 
 impl<K: KmerWord> CountWorker<K> {
     pub fn new(
+        collect_timing: bool,
         k: u8,
         canonical: bool,
         partitions: usize,
@@ -56,7 +57,6 @@ impl<K: KmerWord> CountWorker<K> {
         budget: SharedBudget,
         stats: SharedStats,
         kite_writer: Arc<ConcurrentKiteWriter>,
-        zstd_level: i32,
         worker_budget_bytes: usize,
     ) -> Self {
         // Pre-allocate each bucket Vec to the expected steady-state size.
@@ -64,6 +64,7 @@ impl<K: KmerWord> CountWorker<K> {
         // Expected size per bucket: budget / partitions / kmer_byte_size
         let cap_per_bucket = (worker_budget_bytes / partitions / K::byte_size()).max(4096);
         CountWorker {
+            collect_timing,
             k,
             canonical,
             partitions,
@@ -77,7 +78,6 @@ impl<K: KmerWord> CountWorker<K> {
             stats,
             local_stats: LocalCountStats::default(),
             kite_writer,
-            zstd_level,
             byte_buf: Vec::with_capacity(32 * 1024 * 1024),
             entries_buf: Vec::new(),
             wc_staging: {
@@ -99,10 +99,12 @@ impl<K: KmerWord> CountWorker<K> {
     pub fn process_chunk(&mut self, chunk: &[u8]) -> io::Result<()> {
         // Back-pressure: if the global budget is over limit, the workers themselves
         // must flush their buckets to free memory since there is no separate writer thread.
-        while self.budget.is_over_limit() && self.local_bytes > 0 {
-            self.flush_largest_bucket()?;
-            if self.local_bytes == 0 {
+        while self.budget.is_over_limit() {
+            if self.local_bytes > 0 {
+                self.flush_largest_bucket()?;
+            } else if !self.kite_writer.drain_one_partition()? {
                 std::thread::yield_now();
+                break;
             }
         }
 
@@ -118,7 +120,8 @@ impl<K: KmerWord> CountWorker<K> {
         let mut local_bases = 0u64;
         let mut local_kmers = 0u64;
 
-        let t_start = Instant::now();
+        let collect_timing = self.collect_timing;
+        let t_start = collect_timing.then(Instant::now);
         let mut kmer_push_ns = 0u64;
         let _ = parse_sequences(chunk, |seq| {
             local_reads += 1;
@@ -127,7 +130,7 @@ impl<K: KmerWord> CountWorker<K> {
             // ── HOT PATH ───────────────────────────────────────────────────
             // No virtual dispatch: bucket = (kmer >> shift) as usize
             // No shared atomic: stats accumulated in local_stats (plain u64)
-            let t_kmer = Instant::now();
+            let t_kmer = collect_timing.then(Instant::now);
             let mut seq_kmers = 0u64;
             K::scan_sequence(seq, k, canonical, |kmer| {
                 seq_kmers += 1;
@@ -149,7 +152,9 @@ impl<K: KmerWord> CountWorker<K> {
                     unsafe { *wc_lens.get_unchecked_mut(bucket) = new_wlen as u8; }
                 }
             });
-            kmer_push_ns += t_kmer.elapsed().as_nanos() as u64;
+            if let Some(t_kmer) = t_kmer {
+                kmer_push_ns += t_kmer.elapsed().as_nanos() as u64;
+            }
             // ───────────────────────────────────────────────────────────────
 
             local_kmers += seq_kmers;
@@ -157,20 +162,25 @@ impl<K: KmerWord> CountWorker<K> {
         });
 
         // All accumulation into thread-local fields — zero shared-atomic traffic
-        let parse_ns = t_start.elapsed().as_nanos() as u64;
+        let parse_ns = t_start.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
         self.local_stats.reads        += local_reads;
         self.local_stats.bases        += local_bases;
         self.local_stats.valid_kmers  += local_kmers;
         self.local_stats.decomp_bytes += chunk.len() as u64;
-        self.local_stats.parse_ns     += parse_ns;
-        self.local_stats.kmer_ns      += kmer_push_ns;
-        self.local_stats.read_ns      += parse_ns.saturating_sub(kmer_push_ns);
+        if collect_timing {
+            self.local_stats.parse_ns += parse_ns;
+            self.local_stats.kmer_ns += kmer_push_ns;
+            self.local_stats.read_ns += parse_ns.saturating_sub(kmer_push_ns);
+        }
 
         self.local_bytes += added_bytes;
         self.budget.alloc(added_bytes);
 
         if self.local_bytes >= self.local_flush_threshold || self.budget.should_flush() {
             self.flush_largest_bucket()?;
+            if self.kite_writer.needs_runtime_drain() {
+                let _ = self.kite_writer.drain_excess_staging()?;
+            }
         }
         Ok(())
     }
@@ -205,6 +215,11 @@ impl<K: KmerWord> CountWorker<K> {
     /// Called once at end of worker.
     pub fn flush_all(&mut self) -> io::Result<()> {
         self.flush_all_buckets()?;
+        while self.kite_writer.needs_runtime_drain() {
+            if !self.kite_writer.drain_one_partition()? {
+                break;
+            }
+        }
         // Single bulk flush of all thread-local stats → shared atomics
         self.stats.flush_local(&self.local_stats);
         Ok(())
@@ -229,11 +244,13 @@ impl<K: KmerWord> CountWorker<K> {
         let freed_from_local = buf.len() * K::byte_size();
         self.local_bytes = self.local_bytes.saturating_sub(freed_from_local);
 
-        let t_sort = Instant::now();
+        let t_sort = self.collect_timing.then(Instant::now);
         K::sort_slice(buf, self.k);
-        self.local_stats.sort_ns += t_sort.elapsed().as_nanos() as u64;
+        if let Some(t_sort) = t_sort {
+            self.local_stats.sort_ns += t_sort.elapsed().as_nanos() as u64;
+        }
 
-        let t_rle = Instant::now();
+        let t_rle = self.collect_timing.then(Instant::now);
         self.entries_buf.clear();
         rle_compress_typed(buf, &mut self.entries_buf);
 
@@ -243,23 +260,12 @@ impl<K: KmerWord> CountWorker<K> {
 
         self.byte_buf.clear();
         let used_dvle = K::encode_dvle_run(&self.entries_buf, &mut self.byte_buf);
-
-        let mut codec = if used_dvle { CODEC_DVLE } else { CODEC_RAW };
-        if used_dvle {
-        } else {
-            const ZSTD_MIN_LEN: usize = 32 * 1024;
-            if self.zstd_level > 0 && self.byte_buf.len() >= ZSTD_MIN_LEN {
-                if let Ok(compressed) = zstd::bulk::compress(&self.byte_buf, self.zstd_level) {
-                    if compressed.len() < self.byte_buf.len() {
-                        self.byte_buf = compressed;
-                        codec |= CODEC_ZSTD;
-                    }
-                }
-            }
+        let codec = if used_dvle { CODEC_DVLE } else { CODEC_RAW };
+        if let Some(t_rle) = t_rle {
+            let encode_ns = t_rle.elapsed().as_nanos() as u64;
+            self.local_stats.rle_ns += encode_ns;
+            self.local_stats.encode_ns += encode_ns;
         }
-        let encode_ns = t_rle.elapsed().as_nanos() as u64;
-        self.local_stats.rle_ns += encode_ns;
-        self.local_stats.encode_ns += encode_ns;
 
         let n_entries = self.entries_buf.len();
         self.stats.add_bucket_kmers(b, buf.len() as u64);
@@ -292,7 +298,7 @@ impl<K: KmerWord> CountWorker<K> {
         self.budget.free(freed_from_local);
 
         {
-            let t_write = Instant::now();
+            let t_write = self.collect_timing.then(Instant::now);
             self.kite_writer.append_chunk(
                 b,
                 codec,
@@ -306,7 +312,9 @@ impl<K: KmerWord> CountWorker<K> {
             )
                 .map_err(|e| io::Error::new(e.kind(),
                     format!("partition {} append_chunk failed: {}", b, e)))?;
-            self.local_stats.writer_io_ns += t_write.elapsed().as_nanos() as u64;
+            if let Some(t_write) = t_write {
+                self.local_stats.writer_io_ns += t_write.elapsed().as_nanos() as u64;
+            }
         }
         Ok(())
     }
