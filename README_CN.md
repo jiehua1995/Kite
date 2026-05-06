@@ -7,7 +7,6 @@
 
   [![Rust](https://img.shields.io/badge/rust-1.78+-orange.svg)](https://www.rust-lang.org)
 
----
 **Kite** 是一个用 Rust 编写的高性能精确 k-mer 工具箱，覆盖了从计数、存储、导出，到多样本分析和绘图脚本生成的一整条流程。
 
 它的核心目标很明确：

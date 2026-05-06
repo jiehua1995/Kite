@@ -7,7 +7,6 @@
 
   [![Rust](https://img.shields.io/badge/rust-1.78+-orange.svg)](https://www.rust-lang.org)
 
----
 
 **Kite** (K-mer indexing and throughput engine) is a high-performance Rust toolkit designed for exact k-mer counting, storage, inspection, and downstream multi-sample analysis. It leverages Rust's memory safety and performance to provide a robust engine for bioinformatics workflows.
 
