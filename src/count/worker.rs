@@ -7,7 +7,7 @@ use crate::count::sorter::rle_compress_typed;
 use crate::count::memory::SharedBudget;
 use crate::count::writer::ConcurrentKiteWriter;
 use crate::stats::{SharedStats, LocalCountStats};
-use crate::format::{CODEC_DVLE, CODEC_RAW};
+use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
 
 /// Size of each per-bucket staging slot (entries).  With K=u64 (8 B) and
 /// 256 buckets: 256 × 64 × 8 = 131 072 B ≈ 128 KB — fits in L2 cache.
@@ -23,15 +23,17 @@ const WCOM_BATCH: usize = 64;
 /// 2. No per-kmer atomic increment — all stats live in `local_stats`.
 /// 3. Running `local_bytes` counter avoids O(partitions) scan each chunk.
 /// 4. `entries_buf` is reused across flush calls to avoid per-flush mmap.
-/// 5. Direct bucket-file write: workers lock bucket_files[b], write RunHeader+payload,
-///    unlock.  Lock contention is low (different workers hit different buckets).
+/// 5. Workers flush encoded runs into the shared async writer via per-partition staging,
+///    keeping the hot path off blocking file I/O.
 pub struct CountWorker<K: KmerWord> {
     collect_timing: bool,
+    live_progress: bool,
     k: u8,
     canonical: bool,
     partitions: usize,
     bucket_shift: u32,
     local_buckets: Vec<Vec<K>>,
+    bucket_reserved_bytes: Vec<usize>,
     local_bytes: usize,
     local_flush_threshold: usize,
     budget: SharedBudget,
@@ -39,7 +41,10 @@ pub struct CountWorker<K: KmerWord> {
     local_stats: LocalCountStats,
     kite_writer: Arc<ConcurrentKiteWriter>,
     byte_buf: Vec<u8>,
+    byte_buf_reserved_bytes: usize,
     entries_buf: Vec<(K, u32)>,
+    entries_reserved_bytes: usize,
+    zstd_level: i32,
     
     /// Write-combining staging buffer.  Flat array: partitions × WCOM_BATCH entries.
     /// Kept in L2 cache; flushed to local_buckets in 64-entry batches.
@@ -50,6 +55,7 @@ pub struct CountWorker<K: KmerWord> {
 impl<K: KmerWord> CountWorker<K> {
     pub fn new(
         collect_timing: bool,
+        live_progress: bool,
         k: u8,
         canonical: bool,
         partitions: usize,
@@ -57,7 +63,8 @@ impl<K: KmerWord> CountWorker<K> {
         budget: SharedBudget,
         stats: SharedStats,
         kite_writer: Arc<ConcurrentKiteWriter>,
-        worker_budget_bytes: usize,
+        local_flush_threshold: usize,
+        zstd_level: i32,
     ) -> Self {
         // Start with a small initial capacity per bucket to avoid pre-faulting
         // 50+ GB of anonymous pages upfront (which serialises on the kernel
@@ -67,9 +74,19 @@ impl<K: KmerWord> CountWorker<K> {
         // 4 KiB pages for u64 (512 entries × 8B) — stays in L1 on first touch.
         const INITIAL_BUCKET_CAP: usize = 512;
         let cap_per_bucket = INITIAL_BUCKET_CAP.max(64 / K::byte_size());
+        let bucket_bytes = partitions
+            .saturating_mul(cap_per_bucket)
+            .saturating_mul(K::byte_size());
+        let wc_bytes = partitions
+            .saturating_mul(WCOM_BATCH)
+            .saturating_mul(K::byte_size())
+            .saturating_add(partitions);
+        let byte_buf = Vec::with_capacity(32 * 1024 * 1024);
+        budget.acquire(bucket_bytes.saturating_add(wc_bytes).saturating_add(byte_buf.capacity()));
 
         CountWorker {
             collect_timing,
+            live_progress,
             k,
             canonical,
             partitions,
@@ -77,14 +94,18 @@ impl<K: KmerWord> CountWorker<K> {
             local_buckets: (0..partitions)
                 .map(|_| Vec::with_capacity(cap_per_bucket))
                 .collect(),
+            bucket_reserved_bytes: vec![cap_per_bucket * K::byte_size(); partitions],
             local_bytes: 0,
-            local_flush_threshold: worker_budget_bytes,
+            local_flush_threshold,
             budget,
             stats,
             local_stats: LocalCountStats::default(),
             kite_writer,
-            byte_buf: Vec::with_capacity(32 * 1024 * 1024),
+            byte_buf_reserved_bytes: byte_buf.capacity(),
+            byte_buf,
             entries_buf: Vec::new(),
+            entries_reserved_bytes: 0,
+            zstd_level,
             wc_staging: {
                 let n = partitions * WCOM_BATCH;
                 let mut v: Vec<K> = Vec::with_capacity(n);
@@ -98,11 +119,78 @@ impl<K: KmerWord> CountWorker<K> {
         }
     }
 
+    #[inline]
+    fn ensure_bucket_capacity(&mut self, bucket: usize, additional: usize) {
+        let buf = &mut self.local_buckets[bucket];
+        let needed = buf.len().saturating_add(additional);
+        if needed <= buf.capacity() {
+            return;
+        }
+
+        let old_cap = buf.capacity();
+        let reserve_additional = needed.saturating_sub(old_cap);
+        self.budget.acquire(reserve_additional.saturating_mul(K::byte_size()));
+        buf.reserve_exact(reserve_additional);
+
+        let new_cap = buf.capacity();
+        let old_reserved = self.bucket_reserved_bytes[bucket];
+        let new_reserved = new_cap.saturating_mul(K::byte_size());
+        if new_reserved > old_reserved {
+            let extra = new_reserved - old_reserved;
+            if extra > reserve_additional.saturating_mul(K::byte_size()) {
+                self.budget.acquire(extra - reserve_additional.saturating_mul(K::byte_size()));
+            }
+            self.bucket_reserved_bytes[bucket] = new_reserved;
+        }
+    }
+
+    #[inline]
+    fn flush_staging_slot(&mut self, bucket: usize, count: usize) {
+        self.ensure_bucket_capacity(bucket, count);
+        let start = bucket * WCOM_BATCH;
+        unsafe {
+            self.local_buckets.get_unchecked_mut(bucket)
+                .extend_from_slice(self.wc_staging.get_unchecked(start..start + count));
+        }
+        self.local_bytes = self.local_bytes.saturating_add(count.saturating_mul(K::byte_size()));
+    }
+
+    #[inline]
+    fn push_kmer(&mut self, kmer: K) {
+        let bucket = kmer.to_bucket(self.bucket_shift);
+        let wlen = self.wc_lens[bucket] as usize;
+        self.wc_staging[bucket * WCOM_BATCH + wlen] = kmer;
+        let new_wlen = wlen + 1;
+        if new_wlen == WCOM_BATCH {
+            self.flush_staging_slot(bucket, WCOM_BATCH);
+            self.wc_lens[bucket] = 0;
+        } else {
+            self.wc_lens[bucket] = new_wlen as u8;
+        }
+    }
+
+    #[inline]
+    fn track_vec_growth_bytes(
+        reserved_bytes: &mut usize,
+        budget: &SharedBudget,
+        old_cap: usize,
+        new_cap: usize,
+        unit_bytes: usize,
+    ) {
+        if new_cap > old_cap {
+            let delta = (new_cap - old_cap).saturating_mul(unit_bytes);
+            if delta > 0 {
+                budget.acquire(delta);
+                *reserved_bytes = reserved_bytes.saturating_add(delta);
+            }
+        }
+    }
+
     /// Process one decompressed FASTQ chunk.
     #[inline]
     pub fn process_chunk(&mut self, chunk: &[u8]) -> io::Result<()> {
-        // Back-pressure: if the global budget is over limit, the workers themselves
-        // must flush their buckets to free memory since there is no separate writer thread.
+        // Back-pressure: when the global budget hits the limit, workers must flush
+        // local buckets so the async writer can keep the data path streaming.
         while self.budget.is_over_limit() {
             if self.local_bytes > 0 {
                 self.flush_all_buckets()?;
@@ -114,12 +202,6 @@ impl<K: KmerWord> CountWorker<K> {
 
         let k = self.k;
         let canonical = self.canonical;
-        let bucket_shift = self.bucket_shift;
-        let local_buckets = &mut self.local_buckets;
-        let wc_staging = &mut self.wc_staging;
-        let wc_lens = &mut self.wc_lens;
-        // Incremental byte tracking (avoids per-kmer atomic + O(P) sum)
-        let mut added_bytes = 0usize;
         let mut local_reads = 0u64;
         let mut local_bases = 0u64;
         let mut local_kmers = 0u64;
@@ -138,23 +220,7 @@ impl<K: KmerWord> CountWorker<K> {
             let mut seq_kmers = 0u64;
             K::scan_sequence(seq, k, canonical, |kmer| {
                 seq_kmers += 1;
-                let bucket = kmer.to_bucket(bucket_shift);
-                // Write-combining: stage to L2-cache-hot buffer (256×64 entries).
-                // Amortises DRAM scatter latency: 1 cache-miss per 8 pushes
-                // (64 × 8B = 512B = 8 cache lines, vs 1 miss per push without).
-                let wlen = unsafe { *wc_lens.get_unchecked(bucket) } as usize;
-                unsafe { *wc_staging.get_unchecked_mut(bucket * WCOM_BATCH + wlen) = kmer; }
-                let new_wlen = wlen + 1;
-                if new_wlen == WCOM_BATCH {
-                    let start = bucket * WCOM_BATCH;
-                    unsafe {
-                        local_buckets.get_unchecked_mut(bucket)
-                            .extend_from_slice(wc_staging.get_unchecked(start..start + WCOM_BATCH));
-                        *wc_lens.get_unchecked_mut(bucket) = 0;
-                    }
-                } else {
-                    unsafe { *wc_lens.get_unchecked_mut(bucket) = new_wlen as u8; }
-                }
+                self.push_kmer(kmer);
             });
             if let Some(t_kmer) = t_kmer {
                 kmer_push_ns += t_kmer.elapsed().as_nanos() as u64;
@@ -162,23 +228,26 @@ impl<K: KmerWord> CountWorker<K> {
             // ───────────────────────────────────────────────────────────────
 
             local_kmers += seq_kmers;
-            added_bytes += seq_kmers as usize * K::byte_size();
         });
 
         // All accumulation into thread-local fields — zero shared-atomic traffic
         let parse_ns = t_start.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
-        self.local_stats.reads        += local_reads;
-        self.local_stats.bases        += local_bases;
-        self.local_stats.valid_kmers  += local_kmers;
-        self.local_stats.decomp_bytes += chunk.len() as u64;
+        if self.live_progress {
+            self.stats.add_reads(local_reads);
+            self.stats.add_bases(local_bases);
+            self.stats.add_valid_kmers(local_kmers);
+            self.stats.add_decomp_bytes(chunk.len() as u64);
+        } else {
+            self.local_stats.reads        += local_reads;
+            self.local_stats.bases        += local_bases;
+            self.local_stats.valid_kmers  += local_kmers;
+            self.local_stats.decomp_bytes += chunk.len() as u64;
+        }
         if collect_timing {
             self.local_stats.parse_ns += parse_ns;
             self.local_stats.kmer_ns += kmer_push_ns;
             self.local_stats.read_ns += parse_ns.saturating_sub(kmer_push_ns);
         }
-
-        self.local_bytes += added_bytes;
-        self.budget.alloc(added_bytes);
 
         if self.local_bytes >= self.local_flush_threshold || self.budget.should_flush() {
             // Flush ALL non-empty buckets in one go so local_bytes resets to
@@ -222,37 +291,64 @@ impl<K: KmerWord> CountWorker<K> {
         // Drain write-combiner staging slot first (may hold up to WCOM_BATCH-1 entries).
         let wlen = self.wc_lens[b] as usize;
         if wlen > 0 {
-            let start = b * WCOM_BATCH;
-            let staged_ptr = self.wc_staging.as_ptr();
-            unsafe {
-                self.local_buckets[b].extend_from_slice(
-                    std::slice::from_raw_parts(staged_ptr.add(start), wlen)
-                );
-            }
+            self.flush_staging_slot(b, wlen);
             self.wc_lens[b] = 0;
         }
-        let buf = &mut self.local_buckets[b];
-        if buf.is_empty() { return Ok(()); }
-        let freed_from_local = buf.len() * K::byte_size();
+        if self.local_buckets[b].is_empty() { return Ok(()); }
+        let freed_from_local = self.local_buckets[b].len() * K::byte_size();
         self.local_bytes = self.local_bytes.saturating_sub(freed_from_local);
 
         let t_sort = self.collect_timing.then(Instant::now);
-        K::sort_slice(buf, self.k);
+        K::sort_slice(&mut self.local_buckets[b], self.k);
         if let Some(t_sort) = t_sort {
             self.local_stats.sort_ns += t_sort.elapsed().as_nanos() as u64;
         }
 
         let t_rle = self.collect_timing.then(Instant::now);
         self.entries_buf.clear();
-        rle_compress_typed(buf, &mut self.entries_buf);
+        let entries_old_cap = self.entries_buf.capacity();
+        rle_compress_typed(&self.local_buckets[b], &mut self.entries_buf);
+        Self::track_vec_growth_bytes(
+            &mut self.entries_reserved_bytes,
+            &self.budget,
+            entries_old_cap,
+            self.entries_buf.capacity(),
+            std::mem::size_of::<(K, u32)>(),
+        );
 
-        let raw_bytes = (self.entries_buf.len() * K::entry_size()) as u64;
         let (key_min_lo, key_min_hi) = self.entries_buf[0].0.split_key();
         let (key_max_lo, key_max_hi) = self.entries_buf[self.entries_buf.len() - 1].0.split_key();
 
         self.byte_buf.clear();
+        let byte_old_cap = self.byte_buf.capacity();
         let used_dvle = K::encode_dvle_run(&self.entries_buf, &mut self.byte_buf);
-        let codec = if used_dvle { CODEC_DVLE } else { CODEC_RAW };
+        Self::track_vec_growth_bytes(
+            &mut self.byte_buf_reserved_bytes,
+            &self.budget,
+            byte_old_cap,
+            self.byte_buf.capacity(),
+            1,
+        );
+        let mut codec = if used_dvle { CODEC_DVLE } else { CODEC_RAW };
+        let payload_raw_bytes = self.byte_buf.len() as u64;
+        let logical_entry_bytes = self.entries_buf.len().saturating_mul(K::entry_size());
+        let k = self.k;
+        let base_zstd_level = self.zstd_level;
+        let zstd_level = Self::compression_level_for(base_zstd_level, k, payload_raw_bytes as usize, logical_entry_bytes, used_dvle, K::entry_size());
+        if zstd_level > 0 && payload_raw_bytes as usize >= Self::min_compression_input_bytes(k, used_dvle, K::entry_size()) {
+            if let Ok(compressed) = zstd::bulk::compress(&self.byte_buf, zstd_level) {
+                let min_savings = Self::min_compression_savings_bytes(payload_raw_bytes as usize, logical_entry_bytes, used_dvle, K::entry_size());
+                if compressed.len().saturating_add(min_savings) < self.byte_buf.len() {
+                    self.byte_buf = compressed;
+                    if self.byte_buf.capacity() > self.byte_buf_reserved_bytes {
+                        let delta = self.byte_buf.capacity() - self.byte_buf_reserved_bytes;
+                        self.budget.acquire(delta);
+                        self.byte_buf_reserved_bytes = self.byte_buf.capacity();
+                    }
+                    codec |= CODEC_ZSTD;
+                }
+            }
+        }
         if let Some(t_rle) = t_rle {
             let encode_ns = t_rle.elapsed().as_nanos() as u64;
             self.local_stats.rle_ns += encode_ns;
@@ -260,7 +356,7 @@ impl<K: KmerWord> CountWorker<K> {
         }
 
         let n_entries = self.entries_buf.len();
-        self.stats.add_bucket_kmers(b, buf.len() as u64);
+    self.stats.add_bucket_kmers(b, self.local_buckets[b].len() as u64);
         self.stats.add_bucket_runs(b);
         self.local_stats.flush_count += 1;
         self.local_stats.run_count   += 1;
@@ -273,15 +369,30 @@ impl<K: KmerWord> CountWorker<K> {
 
         self.entries_buf.clear();
         if self.entries_buf.capacity() > expected_cap * 4 {
+            let old_cap = self.entries_buf.capacity();
             self.entries_buf.shrink_to(expected_cap * 2);
+            let new_cap = self.entries_buf.capacity();
+            let old_bytes = old_cap.saturating_mul(std::mem::size_of::<(K, u32)>());
+            let new_bytes = new_cap.saturating_mul(std::mem::size_of::<(K, u32)>());
+            if old_bytes > new_bytes {
+                self.budget.free(old_bytes - new_bytes);
+                self.entries_reserved_bytes = self.entries_reserved_bytes.saturating_sub(old_bytes - new_bytes);
+            }
         }
 
-        buf.clear();
-        if buf.capacity() > expected_cap * 4 {
-            buf.shrink_to(expected_cap * 2);
+        self.local_buckets[b].clear();
+        if self.local_buckets[b].capacity() > expected_cap * 4 {
+            let old_cap = self.local_buckets[b].capacity();
+            self.local_buckets[b].shrink_to(expected_cap * 2);
+            let new_cap = self.local_buckets[b].capacity();
+            let old_bytes = old_cap.saturating_mul(K::byte_size());
+            let new_bytes = new_cap.saturating_mul(K::byte_size());
+            if old_bytes > new_bytes {
+                self.budget.free(old_bytes - new_bytes);
+                self.bucket_reserved_bytes[b] = new_bytes;
+            }
         }
-
-        self.budget.free(freed_from_local);
+        self.local_bytes = self.local_bytes.saturating_sub(freed_from_local);
 
         {
             let t_write = self.collect_timing.then(Instant::now);
@@ -289,7 +400,7 @@ impl<K: KmerWord> CountWorker<K> {
                 b,
                 codec,
                 n_entries as u64,
-                raw_bytes,
+                payload_raw_bytes,
                 key_min_lo,
                 key_min_hi,
                 key_max_lo,
@@ -303,5 +414,53 @@ impl<K: KmerWord> CountWorker<K> {
             }
         }
         Ok(())
+    }
+
+    #[inline]
+    fn min_compression_input_bytes(k: u8, used_dvle: bool, entry_size: usize) -> usize {
+        match (entry_size, used_dvle, k) {
+            (12, true, 0..=31) => 16 * 1024,
+            (20, true, _) => 32 * 1024,
+            (36, _, _) => 64 * 1024,
+            _ => 32 * 1024,
+        }
+    }
+
+    #[inline]
+    fn min_compression_savings_bytes(
+        payload_bytes: usize,
+        logical_entry_bytes: usize,
+        used_dvle: bool,
+        entry_size: usize,
+    ) -> usize {
+        let ratio_bias = logical_entry_bytes.saturating_sub(payload_bytes) / 32;
+        let absolute_floor = match (entry_size, used_dvle) {
+            (12, true) => 8 * 1024,
+            (20, true) => 16 * 1024,
+            _ => 32 * 1024,
+        };
+        absolute_floor.max(payload_bytes / 100).saturating_sub(ratio_bias.min(24 * 1024))
+    }
+
+    #[inline]
+    fn compression_level_for(
+        base_level: i32,
+        k: u8,
+        payload_bytes: usize,
+        logical_entry_bytes: usize,
+        used_dvle: bool,
+        entry_size: usize,
+    ) -> i32 {
+        if base_level <= 0 {
+            return 0;
+        }
+        let mut level = base_level;
+        if used_dvle && entry_size == 12 && k <= 31 && payload_bytes >= 1024 * 1024 {
+            level += 1;
+        }
+        if logical_entry_bytes >= payload_bytes.saturating_mul(2) && payload_bytes >= 4 * 1024 * 1024 {
+            level += 1;
+        }
+        level.min(6)
     }
 }

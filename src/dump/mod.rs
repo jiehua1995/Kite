@@ -1,16 +1,15 @@
 pub mod reader;
-pub mod run_cursor;
 pub mod loser_tree;
 pub mod decoder;
 pub mod writer;
-pub mod worker;
 pub mod merge;
 
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, IsTerminal, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::bounded;
 use rayon::prelude::*;
@@ -19,13 +18,144 @@ use crate::cli::DumpArgs;
 use crate::dump::merge::stream_partition_slabs;
 use crate::dump::reader::KiteReader;
 use crate::dump::writer::{
-    default_writer_threads,
     queue_slots_for,
     SlabPool,
     DUMP_QUEUE_BYTES,
     DUMP_SLAB_BYTES,
 };
 use crate::stats::DumpStats;
+
+fn spawn_dump_progress(
+    enabled: bool,
+    stats: Arc<DumpStats>,
+    total_partitions: usize,
+    total_rows: u64,
+    total_chunks: u64,
+    worker_threads: usize,
+    started_at: Instant,
+) -> Option<(Arc<AtomicBool>, thread::JoinHandle<()>)> {
+    if !enabled {
+        return None;
+    }
+    let running = Arc::new(AtomicBool::new(true));
+    let running_flag = Arc::clone(&running);
+    Some((
+        running,
+        thread::spawn(move || {
+            let is_tty = std::io::stderr().is_terminal();
+            let mut rendered = false;
+            let mut last_fallback = Instant::now() - Duration::from_secs(60);
+            let total_header = format!(
+                "[kite dump] total partitions={} chunks={} rows={} workers={} writers=1",
+                total_partitions,
+                total_chunks,
+                fmt_num_compact(total_rows),
+                worker_threads,
+            );
+            while running_flag.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(250));
+                if !running_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                let wall = started_at.elapsed().as_secs_f64();
+                let done = stats.partitions_processed.load(Ordering::Relaxed);
+                let rows = stats.total_rows.load(Ordering::Relaxed);
+                let written = stats.bytes_written.load(Ordering::Relaxed);
+                let progress = if total_rows > 0 {
+                    (rows as f64 / total_rows as f64).clamp(0.0, 0.999)
+                } else if total_partitions > 0 {
+                    (done as f64 / total_partitions as f64).clamp(0.0, 0.999)
+                } else {
+                    0.0
+                };
+                let eta = if progress > 0.001 {
+                    Some(Duration::from_secs_f64(wall * (1.0 - progress) / progress))
+                } else {
+                    None
+                };
+                let detail = format!(
+                    "[kite dump] done partitions={}/{} rows={}/{} ({:5.1}%) written={} elapsed={} eta={}",
+                    done,
+                    total_partitions,
+                    fmt_num_compact(rows),
+                    fmt_num_compact(total_rows),
+                    progress * 100.0,
+                    fmt_bytes_compact(written),
+                    fmt_duration_compact(Duration::from_secs_f64(wall)),
+                    fmt_eta_compact(eta),
+                );
+                if is_tty {
+                    let mut stderr = std::io::stderr().lock();
+                    if rendered {
+                        let _ = write!(stderr, "\x1b[2F");
+                    }
+                    let _ = write!(stderr, "\x1b[2K{}\n\x1b[2K{}\n", total_header, detail);
+                    let _ = stderr.flush();
+                    rendered = true;
+                } else if last_fallback.elapsed() >= Duration::from_secs(15) {
+                    eprintln!("{} | {}", total_header, detail);
+                    last_fallback = Instant::now();
+                }
+            }
+        }),
+    ))
+}
+
+fn clear_progress_lines(line_count: usize) {
+    if !std::io::stderr().is_terminal() || line_count == 0 {
+        return;
+    }
+    let mut stderr = std::io::stderr().lock();
+    let _ = write!(stderr, "\x1b[{}F", line_count);
+    for index in 0..line_count {
+        let _ = write!(stderr, "\x1b[2K");
+        if index + 1 < line_count {
+            let _ = write!(stderr, "\n");
+        }
+    }
+    let _ = write!(stderr, "\r");
+    let _ = stderr.flush();
+}
+
+fn fmt_num_compact(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+fn fmt_bytes_compact(value: u64) -> String {
+    if value >= 1024 * 1024 * 1024 {
+        format!("{:.2}GB", value as f64 / 1024.0 / 1024.0 / 1024.0)
+    } else if value >= 1024 * 1024 {
+        format!("{:.2}MB", value as f64 / 1024.0 / 1024.0)
+    } else if value >= 1024 {
+        format!("{:.2}KB", value as f64 / 1024.0)
+    } else {
+        format!("{}B", value)
+    }
+}
+
+fn fmt_duration_compact(duration: Duration) -> String {
+    let total_secs = duration.as_secs();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+    } else {
+        format!("{:02}:{:02}", minutes, seconds)
+    }
+}
+
+fn fmt_eta_compact(eta: Option<Duration>) -> String {
+    eta.map(fmt_duration_compact).unwrap_or_else(|| "--:--".to_string())
+}
 
 pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     let n_threads = if args.threads == 0 { num_cpus::get() } else { args.threads };
@@ -41,6 +171,7 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     let n_partitions = reader.header.partitions as usize;
     let total_chunks = reader.total_chunks;
     let entry_size = reader.header.entry_size();
+    let total_rows: u64 = reader.chunk_entries.iter().map(|chunk| chunk.row_count).sum();
 
     let chunk_counts: Vec<u64> = reader.partition_entries.iter().map(|p| p.chunk_count).collect();
     let hottest = chunk_counts.iter().copied().max().unwrap_or(0);
@@ -56,14 +187,18 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     stats.set_partition_distribution(hottest, coldest, p99_chunk_bytes);
 
     let worker_count = n_threads.clamp(1, n_partitions.max(1));
-    let writer_threads = if args.writer_threads == 0 {
-        default_writer_threads(n_threads)
-    } else {
-        args.writer_threads.max(1)
-    };
+    let progress_handle = spawn_dump_progress(
+        args.progress,
+        Arc::clone(&stats),
+        n_partitions,
+        total_rows,
+        total_chunks,
+        worker_count,
+        wall_start,
+    );
     let slab_pool = Arc::new(SlabPool::new(
         slab_bytes,
-        queue_slots_for(slab_bytes, DUMP_QUEUE_BYTES, writer_threads).saturating_add(writer_threads),
+        queue_slots_for(slab_bytes, DUMP_QUEUE_BYTES, worker_count).saturating_add(1),
     ));
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(worker_count.max(1))
@@ -92,6 +227,11 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
             stats.print_report(&args.input, total_chunks, n_partitions, wall);
         } else {
             eprintln!("[kite dump] done in {:.3}s", wall.as_secs_f64());
+        }
+        if let Some((running, handle)) = progress_handle {
+            running.store(false, Ordering::Relaxed);
+            let _ = handle.join();
+            clear_progress_lines(2);
         }
         return Ok(());
     }
@@ -187,6 +327,11 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
         .map_err(anyhow::Error::from)?;
 
     let wall = wall_start.elapsed();
+    if let Some((running, handle)) = progress_handle {
+        running.store(false, Ordering::Relaxed);
+        let _ = handle.join();
+        clear_progress_lines(2);
+    }
     if args.test_mode {
         stats.print_report(&args.input, total_chunks, n_partitions, wall);
     } else {

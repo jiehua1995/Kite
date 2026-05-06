@@ -74,6 +74,97 @@ impl DvleRunIter {
     }
 }
 
+struct OwnedRunIter {
+    data: Vec<u8>,
+    entry_count: usize,
+    entry_size: usize,
+    current: usize,
+}
+
+impl OwnedRunIter {
+    fn new(data: Vec<u8>, entry_count: usize, entry_size: usize) -> Self {
+        Self { data, entry_count, entry_size, current: 0 }
+    }
+}
+
+impl Iterator for OwnedRunIter {
+    type Item = (u128, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current >= self.entry_count {
+            return None;
+        }
+        let off = self.current * self.entry_size;
+        self.current += 1;
+        if self.entry_size == 12 {
+            let key = u64::from_le_bytes(self.data[off..off + 8].try_into().unwrap()) as u128;
+            let count = u32::from_le_bytes(self.data[off + 8..off + 12].try_into().unwrap());
+            Some((key, count))
+        } else {
+            let key = u128::from_le_bytes(self.data[off..off + 16].try_into().unwrap());
+            let count = u32::from_le_bytes(self.data[off + 16..off + 20].try_into().unwrap());
+            Some((key, count))
+        }
+    }
+}
+
+struct OwnedDvleRunIter {
+    data: Vec<u8>,
+    pos: usize,
+    remaining: usize,
+    prev_key: u128,
+    wide: bool,
+}
+
+impl OwnedDvleRunIter {
+    fn new(data: Vec<u8>, remaining: usize, wide: bool) -> Self {
+        Self { data, pos: 0, remaining, prev_key: 0, wide }
+    }
+}
+
+impl Iterator for OwnedDvleRunIter {
+    type Item = (u128, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        if self.pos == 0 {
+            if self.wide {
+                let key = u128::from_le_bytes(self.data[0..16].try_into().unwrap());
+                let count = u32::from_le_bytes(self.data[16..20].try_into().unwrap());
+                self.prev_key = key;
+                self.pos = 20;
+                return Some((key, count));
+            }
+            let key = u64::from_le_bytes(self.data[0..8].try_into().unwrap()) as u128;
+            let count = u32::from_le_bytes(self.data[8..12].try_into().unwrap());
+            self.prev_key = key;
+            self.pos = 12;
+            return Some((key, count));
+        }
+
+        if self.wide {
+            let (delta, n_delta) = crate::format::run_block::read_varint_u128(&self.data[self.pos..]);
+            self.pos += n_delta;
+            let (count, n_count) = crate::format::run_block::read_varint_u64(&self.data[self.pos..]);
+            self.pos += n_count;
+            let key = self.prev_key.wrapping_add(delta);
+            self.prev_key = key;
+            Some((key, count as u32))
+        } else {
+            let (delta, n_delta) = crate::format::run_block::read_varint_u64(&self.data[self.pos..]);
+            self.pos += n_delta;
+            let (count, n_count) = crate::format::run_block::read_varint_u64(&self.data[self.pos..]);
+            self.pos += n_count;
+            let key = self.prev_key.wrapping_add(delta as u128);
+            self.prev_key = key;
+            Some((key, count as u32))
+        }
+    }
+}
+
 impl Iterator for DvleRunIter {
     type Item = (u128, u32);
 
@@ -127,8 +218,22 @@ fn build_partition_merger(
         Vec::with_capacity(partition_chunks.len());
 
     for loc in partition_chunks {
-        if loc.is_dvle() {
+        if loc.is_zstd() && loc.is_dvle() {
+            let payload = reader.run_data_for_decode(loc)?;
+            streams.push(Box::new(OwnedDvleRunIter::new(
+                payload.into_owned(),
+                loc.row_count as usize,
+                entry_size == 20,
+            )));
+        } else if loc.is_dvle() {
             streams.push(Box::new(DvleRunIter::new(Arc::clone(reader), loc, entry_size == 20)));
+        } else if loc.is_zstd() {
+            let payload = reader.run_data_for_decode(loc)?;
+            streams.push(Box::new(OwnedRunIter::new(
+                payload.into_owned(),
+                loc.row_count as usize,
+                entry_size,
+            )));
         } else {
             streams.push(Box::new(MmapRunIter::new(Arc::clone(reader), loc, entry_size)));
         }
@@ -168,7 +273,8 @@ where
         let total_entries: usize = partition_chunks.iter().map(|c| c.row_count as usize).sum();
         let mut all: Vec<(u128, u128, u32)> = Vec::with_capacity(total_entries);
         for loc in partition_chunks {
-            let slice = reader.run_data_slice(loc);
+            let payload = reader.run_data_for_decode(loc)?;
+            let slice = payload.as_ref();
             for i in 0..loc.row_count as usize {
                 let off = i * 36;
                 let lo = u128::from_le_bytes(slice[off..off + 16].try_into().unwrap());

@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, Args, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum CountMode {
@@ -7,9 +7,38 @@ pub enum CountMode {
     Compact,
 }
 
+impl CountMode {
+    #[inline]
+    pub fn zstd_level(self) -> i32 {
+        match self {
+            CountMode::Fast => 1,
+            CountMode::Balanced => 2,
+            CountMode::Compact => 5,
+        }
+    }
+
+    #[inline]
+    pub fn target_staging_cap_mb(self) -> usize {
+        match self {
+            CountMode::Fast => 24,
+            CountMode::Balanced => 8,
+            CountMode::Compact => 4,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
-#[command(name = "kite", about = "High-performance k-mer counter", version)]
+#[command(
+    name = "kite",
+    about = "High-performance k-mer counter",
+    version,
+    disable_version_flag = true
+)]
 pub struct Cli {
+    /// Show version information
+    #[arg(short = 'v', long = "version", action = ArgAction::Version, global = true)]
+    _version: Option<bool>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -48,8 +77,8 @@ pub struct CountArgs {
     #[arg(long = "chunk-kmers", default_value_t = 8_000_000)]
     pub chunk_kmers: usize,
 
-    /// Maximum memory budget in GB (must truly affect buffer sizes and flush strategy)
-    #[arg(long = "max-memory-gb", default_value_t = 16.0)]
+    /// Maximum memory budget in GB (0 = auto-detect and use almost all physical memory)
+    #[arg(long = "max-memory-gb", default_value_t = 0.0)]
     pub max_memory_gb: f64,
 
     /// Count canonical k-mers (min of forward and reverse complement)
@@ -86,10 +115,6 @@ pub struct DumpArgs {
     /// Number of threads (0 = auto-detect)
     #[arg(long = "threads", default_value_t = 0)]
     pub threads: usize,
-
-    /// Number of dump writer threads (0 = auto => max(1, threads / 6)).
-    #[arg(long = "writer-threads", default_value_t = 0)]
-    pub writer_threads: usize,
 
     /// Show progress during dumping
     #[arg(long = "progress")]

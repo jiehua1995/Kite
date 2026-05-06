@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::thread;
 
 /// Global memory budget tracker.
 /// Workers register allocations/frees to track total in-flight memory.
@@ -12,9 +13,8 @@ pub struct MemoryBudget {
 }
 
 impl MemoryBudget {
-    pub fn new(limit_gb: f64) -> Self {
-        let limit = (limit_gb * 1024.0 * 1024.0 * 1024.0) as usize;
-        let flush_threshold = (limit as f64 * 0.85) as usize;
+    pub fn new(limit: usize) -> Self {
+        let flush_threshold = limit.saturating_mul(19).checked_div(20).unwrap_or(limit);
         MemoryBudget {
             current: AtomicUsize::new(0),
             limit,
@@ -23,8 +23,35 @@ impl MemoryBudget {
     }
 
     #[inline]
-    pub fn alloc(&self, bytes: usize) {
-        self.current.fetch_add(bytes, Ordering::Relaxed);
+    pub fn try_acquire(&self, bytes: usize) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        let mut current = self.current.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = current.checked_add(bytes) else {
+                return false;
+            };
+            if next > self.limit {
+                return false;
+            }
+            match self.current.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    #[inline]
+    pub fn acquire(&self, bytes: usize) {
+        while !self.try_acquire(bytes) {
+            thread::yield_now();
+        }
     }
 
     #[inline]
@@ -54,6 +81,11 @@ impl MemoryBudget {
 
     #[allow(dead_code)]
     pub fn flush_threshold(&self) -> usize { self.flush_threshold }
+
+    #[inline]
+    pub fn limit_bytes(&self) -> usize {
+        self.limit
+    }
 }
 
 pub type SharedBudget = Arc<MemoryBudget>;

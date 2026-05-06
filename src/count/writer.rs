@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 
-use crossbeam_channel::{bounded, Sender};
+use crossbeam_channel::{Sender, bounded};
 
 use crate::count::memory::SharedBudget;
 use crate::format::{ChunkIndexEntry, KiteHeader, Kx2Footer, PartitionEntry};
@@ -43,22 +43,13 @@ struct PartitionStaging {
     capacity_reserved: bool,
 }
 
-// Async writer thread design:
-// Workers encode partition data into staging buffers, then enqueue them to a
-// bounded crossbeam channel in FIFO order (offset and channel-push are done
-// atomically under a short-lived mutex).  A dedicated writer thread drains
-// the channel and writes data sequentially to a BufWriter<File>.
-// The mutex hold time is O(1) (one atomic increment + one pointer copy into
-// the channel), so 23 workers never convoy behind a long OS write.
 struct KiteFileState {
     next_offset: u64,
-    write_tx: Option<Sender<Vec<u8>>>,  // taken (set to None) during finalize
+    write_tx: Option<Sender<Vec<u8>>>,
 }
 
 pub struct ConcurrentKiteWriter {
     file_state: Mutex<KiteFileState>,
-    /// Clone of write_tx for cheap is_full() pre-checks outside the mutex.
-    /// Set to None during finalize to close the channel.
     write_tx_probe: Option<Sender<Vec<u8>>>,
     write_thread: Option<JoinHandle<io::Result<File>>>,
     budget: SharedBudget,
@@ -75,8 +66,6 @@ pub struct ConcurrentKiteWriter {
 }
 
 impl ConcurrentKiteWriter {
-    /// Kept for API compatibility; write-lane count is ignored in the new
-    /// sequential-writer design but the caller still passes it.
     pub fn suggest_write_lanes(n_workers: usize) -> usize {
         n_workers.div_ceil(8).clamp(2, 6)
     }
@@ -101,24 +90,23 @@ impl ConcurrentKiteWriter {
         }
         file.write_all(&header_buf)?;
 
-        // Channel capacity: enough slots to smooth brief compute bursts.
-        // Each slot holds one staging flush (~staging_bytes of data).
         let channel_cap = (write_lane_count * 8).max(32);
         let (write_tx, write_rx) = bounded::<Vec<u8>>(channel_cap);
         let write_tx_probe = write_tx.clone();
 
-        // Spawn dedicated writer thread: drains channel, writes sequentially.
         let buf_capacity = staging_bytes.saturating_mul(4).max(64 * 1024 * 1024);
         let write_thread = std::thread::spawn(move || -> io::Result<File> {
-            let mut bw = BufWriter::with_capacity(buf_capacity, file);
+            let mut writer = BufWriter::with_capacity(buf_capacity, file);
             while let Ok(data) = write_rx.recv() {
-                bw.write_all(&data)?;
+                writer.write_all(&data)?;
             }
-            bw.flush()?;
-            bw.into_inner().map_err(|e| e.into_error())
+            writer.flush()?;
+            writer.into_inner().map_err(|err| err.into_error())
         });
 
-        let high_watermark = staging_bytes.saturating_mul(write_lane_count.saturating_mul(4)).max(staging_bytes);
+        let high_watermark = staging_bytes
+            .saturating_mul(write_lane_count.saturating_mul(4))
+            .max(staging_bytes);
         let low_watermark = high_watermark / 2;
 
         Ok(Self {
@@ -158,7 +146,43 @@ impl ConcurrentKiteWriter {
         if !staging.capacity_reserved {
             staging.buffer.reserve_exact(self.staging_bytes);
             staging.capacity_reserved = true;
-            self.budget.alloc(self.staging_bytes);
+            self.budget.acquire(self.staging_bytes);
+        }
+    }
+
+    fn claim_offset_and_enqueue(&self, mut data: Vec<u8>) -> io::Result<u64> {
+        let data_len = data.len() as u64;
+        loop {
+            while self.write_tx_probe.as_ref().is_some_and(|probe| probe.is_full()) {
+                std::thread::yield_now();
+            }
+
+            let mut state = self.file_state.lock().unwrap();
+            let send_result = {
+                let tx = state.write_tx.as_ref().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "writer finalized")
+                })?;
+                tx.try_send(data)
+            };
+
+            match send_result {
+                Ok(()) => {
+                    let offset = state.next_offset;
+                    state.next_offset += data_len;
+                    return Ok(offset);
+                }
+                Err(crossbeam_channel::TrySendError::Full(returned)) => {
+                    data = returned;
+                    drop(state);
+                    std::thread::yield_now();
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "writer thread exited unexpectedly",
+                    ));
+                }
+            }
         }
     }
 
@@ -172,49 +196,8 @@ impl ConcurrentKiteWriter {
         }
 
         let flush_len = staging.buffer.len();
-        // Move data out of staging buffer; restore on channel-full (see below).
-        let mut data = std::mem::take(&mut staging.buffer);
-
-        // Claim sequential file offset and enqueue to the async writer thread.
-        // The mutex protects the atomic (offset-claim + channel-send) pair so
-        // FIFO send order matches the claimed offsets.
-        // If the channel is full we spin-yield OUTSIDE the mutex to avoid a
-        // mutex convoy while the writer thread drains.
-        let offset = loop {
-            // Pre-check without the mutex: avoids a futex round-trip when the
-            // channel is saturated and the writer thread is still catching up.
-            while self.write_tx_probe.as_ref().map_or(false, |p| p.is_full()) {
-                std::thread::yield_now();
-            }
-
-            let mut fs = self.file_state.lock().unwrap();
-            // Evaluate try_send in a sub-block so the borrow of `fs` through
-            // `tx` ends before we mutate `fs.next_offset` below.
-            let send_result = {
-                let tx = fs.write_tx.as_ref()
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "writer finalized"))?;
-                tx.try_send(data)
-            };
-            match send_result {
-                Ok(()) => {
-                    let off = fs.next_offset;
-                    fs.next_offset += flush_len as u64;
-                    break off;
-                }
-                Err(crossbeam_channel::TrySendError::Full(returned)) => {
-                    // Lost the is_full() vs lock race; retry outside the mutex.
-                    data = returned;
-                    drop(fs);
-                    std::thread::yield_now();
-                }
-                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "writer thread exited unexpectedly",
-                    ));
-                }
-            }
-        };
+        let data = std::mem::take(&mut staging.buffer);
+        let offset = self.claim_offset_and_enqueue(data)?;
 
         self.staged_bytes.fetch_sub(flush_len, Ordering::Relaxed);
 
@@ -231,7 +214,6 @@ impl ConcurrentKiteWriter {
                 key_max_hi: pending.key_max_hi,
             });
         }
-        // staging.buffer was already taken via mem::take above.
         Ok(())
     }
 
@@ -264,18 +246,15 @@ impl ConcurrentKiteWriter {
 
     pub fn drain_excess_staging(&self) -> io::Result<bool> {
         let mut drained_any = false;
-        // Drain up to a fixed number of partitions per call.
-        // With the sequential writer one drain at a time is fine.
         let max_attempts = 4usize;
+        let mut attempts = 0usize;
 
-        while self.current_staged_bytes() > self.staged_low_watermark && {
-            let attempts_left = max_attempts.saturating_sub(if drained_any { 1 } else { 0 });
-            attempts_left > 0
-        } {
+        while self.current_staged_bytes() > self.staged_low_watermark && attempts < max_attempts {
             if !self.drain_one_partition()? {
                 break;
             }
             drained_any = true;
+            attempts += 1;
         }
 
         Ok(drained_any)
@@ -302,39 +281,8 @@ impl ConcurrentKiteWriter {
             }
 
             if data.len() >= self.staging_bytes {
-                // Large chunk: enqueue directly to the async writer thread,
-                // bypassing the staging buffer.
                 let chunk_len = data.len() as u64;
-                let mut owned = data.to_vec();
-                let offset = loop {
-                    while self.write_tx_probe.as_ref().map_or(false, |p| p.is_full()) {
-                        std::thread::yield_now();
-                    }
-                    let mut fs = self.file_state.lock().unwrap();
-                    let send_result = {
-                        let tx = fs.write_tx.as_ref()
-                            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "writer finalized"))?;
-                        tx.try_send(owned)
-                    };
-                    match send_result {
-                        Ok(()) => {
-                            let off = fs.next_offset;
-                            fs.next_offset += chunk_len;
-                            break off;
-                        }
-                        Err(crossbeam_channel::TrySendError::Full(returned)) => {
-                            owned = returned;
-                            drop(fs);
-                            std::thread::yield_now();
-                        }
-                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::BrokenPipe,
-                                "writer thread exited unexpectedly",
-                            ));
-                        }
-                    }
-                };
+                let offset = self.claim_offset_and_enqueue(data.to_vec())?;
                 staging.committed_chunks.push(ChunkMeta {
                     file_offset: offset,
                     row_count,
@@ -386,17 +334,14 @@ impl ConcurrentKiteWriter {
             all_chunks.push(chunks);
         }
 
-        // Drop BOTH sender clones so the writer channel is fully closed and
-        // the writer thread's recv() loop exits cleanly.
-        let _ = self.write_tx_probe.take();  // drop probe clone
+        let _ = self.write_tx_probe.take();
         let data_end = {
-            let mut fs = self.file_state.lock().unwrap();
-            let data_end = fs.next_offset;
-            let _ = fs.write_tx.take(); // drop in-mutex clone → channel fully closed
+            let mut state = self.file_state.lock().unwrap();
+            let data_end = state.next_offset;
+            let _ = state.write_tx.take();
             data_end
         };
 
-        // Wait for writer thread to flush and return the underlying File.
         let raw_file_result = self
             .write_thread
             .take()
@@ -406,15 +351,6 @@ impl ConcurrentKiteWriter {
         let mut raw_file = raw_file_result?;
 
         let total_chunks: u64 = all_chunks.iter().map(|chunks| chunks.len() as u64).sum();
-        let _total_rows: u64 = all_chunks
-            .iter()
-            .map(|chunks| chunks.iter().map(|chunk| chunk.row_count).sum::<u64>())
-            .sum();
-
-        let chunk_index_offset = data_end;
-        let partition_table_offset = chunk_index_offset + total_chunks * ChunkIndexEntry::SIZE as u64;
-        let footer_offset = partition_table_offset + self.partitions as u64 * PartitionEntry::SIZE as u64;
-        let _total_size = footer_offset + Kx2Footer::SIZE as u64;
         let total_rows: u64 = all_chunks
             .iter()
             .map(|chunks| chunks.iter().map(|chunk| chunk.row_count).sum::<u64>())
@@ -484,8 +420,6 @@ impl ConcurrentKiteWriter {
         }
         trailer.extend_from_slice(&footer_buf);
 
-        // raw_file is already obtained from the writer thread above.
-
         raw_file.seek(SeekFrom::Start(data_end))?;
         raw_file.write_all(&trailer)?;
 
@@ -519,7 +453,11 @@ impl ConcurrentKiteWriter {
             total_rows,
             data_end,
             hottest_partition_segments,
-            least_partition_segments: if self.partitions == 0 { 0 } else { least_partition_segments },
+            least_partition_segments: if self.partitions == 0 {
+                0
+            } else {
+                least_partition_segments
+            },
         })
     }
 }

@@ -1,7 +1,9 @@
 [package]
 name = "kite"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
+description = "K-mer Indexing and Txxx Engine"
+
 
 [[bin]]
 name = "kite"
@@ -17,9 +19,9 @@ rayon = "1"
 libc = "0.2"
 num_cpus = "1"
 anyhow = "1"
-mimalloc = { version = "0.1", default-features = false }
 io-uring = "0.6"
 itoa = "1"
+zstd = { version = "0.13", default-features = false, features = ["zstdmt"] }
 
 [profile.release]
 opt-level = 3
