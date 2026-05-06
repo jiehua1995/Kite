@@ -1,295 +1,0 @@
-====== BENCHMARK START Fri 03 Apr 2026 01:06:32 PM CEST ======
-
-======= KMC: HG002_sample (3.9GB) =======
-
---- KMC HG002 k=21 ---
-***********
-Stage 1: 0%Stage 1: 6%Stage 1: 13%Stage 1: 19%Stage 1: 26%Stage 1: 32%Stage 1: 39%Stage 1: 45%Stage 1: 52%Stage 1: 58%Stage 1: 65%Stage 1: 71%Stage 1: 78%Stage 1: 84%Stage 1: 91%Stage 1: 97%Stage 1: 100%
-Stage 2: 0%Stage 2: 1%Stage 2: 2%Stage 2: 3%Stage 2: 4%Stage 2: 5%Stage 2: 6%Stage 2: 7%Stage 2: 8%Stage 2: 9%Stage 2: 10%Stage 2: 11%Stage 2: 12%Stage 2: 13%Stage 2: 14%Stage 2: 15%Stage 2: 16%Stage 2: 17%Stage 2: 18%Stage 2: 19%Stage 2: 20%Stage 2: 21%Stage 2: 22%Stage 2: 23%Stage 2: 24%Stage 2: 25%Stage 2: 26%Stage 2: 27%Stage 2: 28%Stage 2: 29%Stage 2: 30%Stage 2: 31%Stage 2: 32%Stage 2: 33%Stage 2: 34%Stage 2: 35%Stage 2: 36%Stage 2: 37%Stage 2: 38%Stage 2: 39%Stage 2: 40%Stage 2: 41%Stage 2: 42%Stage 2: 43%Stage 2: 44%Stage 2: 45%Stage 2: 46%Stage 2: 47%Stage 2: 48%Stage 2: 49%Stage 2: 50%Stage 2: 51%Stage 2: 52%Stage 2: 53%Stage 2: 54%Stage 2: 55%Stage 2: 56%Stage 2: 57%Stage 2: 58%Stage 2: 59%Stage 2: 60%Stage 2: 61%Stage 2: 62%Stage 2: 63%Stage 2: 64%Stage 2: 65%Stage 2: 66%Stage 2: 67%Stage 2: 68%Stage 2: 69%Stage 2: 70%Stage 2: 71%Stage 2: 72%Stage 2: 73%Stage 2: 74%Stage 2: 75%Stage 2: 76%Stage 2: 77%Stage 2: 78%Stage 2: 79%Stage 2: 80%Stage 2: 81%Stage 2: 82%Stage 2: 83%Stage 2: 84%Stage 2: 85%Stage 2: 86%Stage 2: 87%Stage 2: 88%Stage 2: 89%Stage 2: 90%Stage 2: 91%Stage 2: 92%Stage 2: 93%Stage 2: 94%Stage 2: 95%Stage 2: 96%Stage 2: 97%Stage 2: 98%Stage 2: 99%Stage 2: 100%
-1st stage: 47.1115s
-2nd stage: 21.498s
-Total    : 68.6094s
-Tmp size : 11180MB
-
-Stats:
-   No. of k-mers below min. threshold :            0
-   No. of k-mers above max. threshold :            0
-   No. of unique k-mers               :   2711890002
-   No. of unique counted k-mers       :   2711890002
-   Total no. of k-mers                :   9009987754
-   Total no. of reads                 :     65170482
-   Total no. of super-k-mers          :   1368368609
-	Command being timed: "/home/zfp_da03/miniforge3/envs/kmc/bin/kmc -k21 -fq -ci1 -cs10000000 -t48 -m64 /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz /tmp/kmc_bench/kmc_out /tmp/kmc_bench"
-	User time (seconds): 796.84
-	System time (seconds): 81.99
-	Percent of CPU this job got: 1278%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:08.71
-	Average shared text size (kbytes): 0
-	Average unshared data size (kbytes): 0
-	Average stack size (kbytes): 0
-	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 53901148
-	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 15
-	Minor (reclaiming a frame) page faults: 19491984
-	Voluntary context switches: 269469
-	Involuntary context switches: 2300
-	Swaps: 0
-	File system inputs: 1568640
-	File system outputs: 58925904
-	Socket messages sent: 0
-	Socket messages received: 0
-	Signals delivered: 0
-	Page size (bytes): 4096
-	Exit status: 0
-
---- KMC HG002 k=31 ---
-***********
-Stage 1: 0%Stage 1: 6%Stage 1: 13%Stage 1: 19%Stage 1: 26%Stage 1: 32%Stage 1: 39%Stage 1: 45%Stage 1: 52%Stage 1: 58%Stage 1: 65%Stage 1: 71%Stage 1: 78%Stage 1: 84%Stage 1: 91%Stage 1: 97%Stage 1: 100%
-Stage 2: 0%Stage 2: 1%Stage 2: 2%Stage 2: 3%Stage 2: 4%Stage 2: 5%Stage 2: 6%Stage 2: 7%Stage 2: 8%Stage 2: 9%Stage 2: 10%Stage 2: 11%Stage 2: 12%Stage 2: 13%Stage 2: 14%Stage 2: 15%Stage 2: 16%Stage 2: 17%Stage 2: 18%Stage 2: 19%Stage 2: 20%Stage 2: 21%Stage 2: 22%Stage 2: 23%Stage 2: 24%Stage 2: 25%Stage 2: 26%Stage 2: 27%Stage 2: 28%Stage 2: 29%Stage 2: 30%Stage 2: 31%Stage 2: 32%Stage 2: 33%Stage 2: 34%Stage 2: 35%Stage 2: 36%Stage 2: 37%Stage 2: 38%Stage 2: 39%Stage 2: 40%Stage 2: 41%Stage 2: 42%Stage 2: 43%Stage 2: 44%Stage 2: 45%Stage 2: 46%Stage 2: 47%Stage 2: 48%Stage 2: 49%Stage 2: 50%Stage 2: 51%Stage 2: 52%Stage 2: 53%Stage 2: 54%Stage 2: 55%Stage 2: 56%Stage 2: 57%Stage 2: 58%Stage 2: 59%Stage 2: 60%Stage 2: 61%Stage 2: 62%Stage 2: 63%Stage 2: 64%Stage 2: 65%Stage 2: 66%Stage 2: 67%Stage 2: 68%Stage 2: 69%Stage 2: 70%Stage 2: 71%Stage 2: 72%Stage 2: 73%Stage 2: 74%Stage 2: 75%Stage 2: 76%Stage 2: 77%Stage 2: 78%Stage 2: 79%Stage 2: 80%Stage 2: 81%Stage 2: 82%Stage 2: 83%Stage 2: 84%Stage 2: 85%Stage 2: 86%Stage 2: 87%Stage 2: 88%Stage 2: 89%Stage 2: 90%Stage 2: 91%Stage 2: 92%Stage 2: 93%Stage 2: 94%Stage 2: 95%Stage 2: 96%Stage 2: 97%Stage 2: 98%Stage 2: 99%Stage 2: 100%
-1st stage: 42.3857s
-2nd stage: 30.6185s
-Total    : 73.0042s
-Tmp size : 8640MB
-
-Stats:
-   No. of k-mers below min. threshold :            0
-   No. of k-mers above max. threshold :            0
-   No. of unique k-mers               :   3101811337
-   No. of unique counted k-mers       :   3101811337
-   Total no. of k-mers                :   8341582924
-   Total no. of reads                 :     65170482
-   Total no. of super-k-mers          :    733855984
-	Command being timed: "/home/zfp_da03/miniforge3/envs/kmc/bin/kmc -k31 -fq -ci1 -cs10000000 -t48 -m64 /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz /tmp/kmc_bench/kmc_out /tmp/kmc_bench"
-	User time (seconds): 672.50
-	System time (seconds): 100.61
-	Percent of CPU this job got: 1057%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:13.10
-	Average shared text size (kbytes): 0
-	Average unshared data size (kbytes): 0
-	Average stack size (kbytes): 0
-	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 61779948
-	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 0
-	Minor (reclaiming a frame) page faults: 20258168
-	Voluntary context switches: 233884
-	Involuntary context switches: 2026
-	Swaps: 0
-	File system inputs: 0
-	File system outputs: 71535280
-	Socket messages sent: 0
-	Socket messages received: 0
-	Signals delivered: 0
-	Page size (bytes): 4096
-	Exit status: 0
-
---- KMC HG002 k=51 ---
-***********
-Stage 1: 0%Stage 1: 6%Stage 1: 13%Stage 1: 19%Stage 1: 26%Stage 1: 32%Stage 1: 39%Stage 1: 45%Stage 1: 52%Stage 1: 58%Stage 1: 65%Stage 1: 71%Stage 1: 78%Stage 1: 84%Stage 1: 91%Stage 1: 97%Stage 1: 100%
-Stage 2: 0%Stage 2: 1%Stage 2: 2%Stage 2: 3%Stage 2: 4%Stage 2: 5%Stage 2: 6%Stage 2: 7%Stage 2: 8%Stage 2: 9%Stage 2: 10%Stage 2: 11%Stage 2: 12%Stage 2: 13%Stage 2: 14%Stage 2: 15%Stage 2: 16%Stage 2: 17%Stage 2: 18%Stage 2: 19%Stage 2: 20%Stage 2: 21%Stage 2: 22%Stage 2: 23%Stage 2: 24%Stage 2: 25%Stage 2: 26%Stage 2: 27%Stage 2: 28%Stage 2: 29%Stage 2: 30%Stage 2: 31%Stage 2: 32%Stage 2: 33%Stage 2: 34%Stage 2: 35%Stage 2: 36%Stage 2: 37%Stage 2: 38%Stage 2: 39%Stage 2: 40%Stage 2: 41%Stage 2: 42%Stage 2: 43%Stage 2: 44%Stage 2: 45%Stage 2: 46%Stage 2: 47%Stage 2: 48%Stage 2: 49%Stage 2: 50%Stage 2: 51%Stage 2: 52%Stage 2: 53%Stage 2: 54%Stage 2: 55%Stage 2: 56%Stage 2: 57%Stage 2: 58%Stage 2: 59%Stage 2: 60%Stage 2: 61%Stage 2: 62%Stage 2: 63%Stage 2: 64%Stage 2: 65%Stage 2: 66%Stage 2: 67%Stage 2: 68%Stage 2: 69%Stage 2: 70%Stage 2: 71%Stage 2: 72%Stage 2: 73%Stage 2: 74%Stage 2: 75%Stage 2: 76%Stage 2: 77%Stage 2: 78%Stage 2: 79%Stage 2: 80%Stage 2: 81%Stage 2: 82%Stage 2: 83%Stage 2: 84%Stage 2: 85%Stage 2: 86%Stage 2: 87%Stage 2: 88%Stage 2: 89%Stage 2: 90%Stage 2: 91%Stage 2: 92%Stage 2: 93%Stage 2: 94%Stage 2: 95%Stage 2: 96%Stage 2: 97%Stage 2: 98%Stage 2: 99%Stage 2: 100%
-1st stage: 40.3189s
-2nd stage: 45.3618s
-Total    : 85.6806s
-Tmp size : 6794MB
-
-Stats:
-   No. of k-mers below min. threshold :            0
-   No. of k-mers above max. threshold :            0
-   No. of unique k-mers               :   3333065244
-   No. of unique counted k-mers       :   3333065244
-   Total no. of k-mers                :   7015489985
-   Total no. of reads                 :     65170482
-   Total no. of super-k-mers          :    362309461
-	Command being timed: "/home/zfp_da03/miniforge3/envs/kmc/bin/kmc -k51 -fq -ci1 -cs10000000 -t48 -m64 /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz /tmp/kmc_bench/kmc_out /tmp/kmc_bench"
-	User time (seconds): 773.42
-	System time (seconds): 99.75
-	Percent of CPU this job got: 1017%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:25.78
-	Average shared text size (kbytes): 0
-	Average unshared data size (kbytes): 0
-	Average stack size (kbytes): 0
-	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 57829464
-	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 7
-	Minor (reclaiming a frame) page faults: 19422221
-	Voluntary context switches: 209643
-	Involuntary context switches: 2885
-	Swaps: 0
-	File system inputs: 944
-	File system outputs: 104544904
-	Socket messages sent: 0
-	Socket messages received: 0
-	Signals delivered: 0
-	Page size (bytes): 4096
-	Exit status: 0
-
-======= kite: HG002_sample (3.9GB) =======
-
---- kite HG002 k=21 ---
-[kite count] input:       /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz
-[kite count] compression: bgzf
-[kite count] k=21, canonical=true, partitions=256
-[kite count] threads total=48, decomp=16, count_workers=30
-[kite count] max-memory-gb=64.0, per-worker budget=1310.7MB
-=== kite count test-mode report ===
-  input file:           /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz
-  k:                    21
-  canonical:            true
-  threads:              48
-  partitions:           256
-  chunk-kmers:          8000000
-  max-memory-gb:        64
-  ---
-  compressed bytes read:    3.84 GB
-  decompressed bytes:       22.17 GB
-  reads processed:          65,170,482
-  bases processed:          10,362,106,638
-  kmers generated:          0
-  valid kmers generated:    9,009,987,754
-  ---
-  total flushes:        8298
-  total runs:           8298
-  avg run entries:      1085802
-  run bytes written:    48.59 GB
-  ---
-  decomp time:          49198ms
-  parse time:           (incl. kmer gen, see kmer gen time)
-  kmer gen time:        0ms
-  sort time:            459860ms
-  rle time:             150853ms
-  write time:           49593ms
-  total wall time:      88.621s
-  peak RSS:             55592MB
-  ---
-  bucket count:         256
-  avg kmers/bucket:     35195264
-  max kmers/bucket:     268692531
-  hottest buckets:
-    bucket    0:  268692531 kmers  (2.98%)
-    bucket    3:  171262324 kmers  (1.90%)
-    bucket    2:  129582018 kmers  (1.44%)
-    bucket   12:  120622418 kmers  (1.34%)
-    bucket   32:  120420606 kmers  (1.34%)
-====================================
-	Command being timed: "/eight_TB/BigMQ/Users/Hua/kmer_counter/kite/target/release/kite count -k 21 -i /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz -o /dev/shm/kite_bench_out/kite_HG002_k21.kite --threads 48 --partitions 256 --max-memory-gb 64 --test-mode"
-	User time (seconds): 648.80
-	System time (seconds): 289.25
-	Percent of CPU this job got: 1050%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:29.28
-	Average shared text size (kbytes): 0
-	Average unshared data size (kbytes): 0
-	Average stack size (kbytes): 0
-	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 108451884
-	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 4
-	Minor (reclaiming a frame) page faults: 19731706
-	Voluntary context switches: 55615
-	Involuntary context switches: 93686
-	Swaps: 0
-	File system inputs: 152
-	File system outputs: 0
-	Socket messages sent: 0
-	Socket messages received: 0
-	Signals delivered: 0
-	Page size (bytes): 4096
-	Exit status: 0
-
---- kite HG002 k=31 ---
-[kite count] input:       /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz
-[kite count] compression: bgzf
-[kite count] k=31, canonical=true, partitions=256
-[kite count] threads total=48, decomp=16, count_workers=30
-[kite count] max-memory-gb=64.0, per-worker budget=1310.7MB
-=== kite count test-mode report ===
-  input file:           /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz
-  k:                    31
-  canonical:            true
-  threads:              48
-  partitions:           256
-  chunk-kmers:          8000000
-  max-memory-gb:        64
-  ---
-  compressed bytes read:    3.84 GB
-  decompressed bytes:       22.17 GB
-  reads processed:          65,170,482
-  bases processed:          10,362,106,638
-  kmers generated:          0
-  valid kmers generated:    8,341,582,924
-  ---
-  total flushes:        8238
-  total runs:           8238
-  avg run entries:      1012573
-  run bytes written:    51.32 GB
-  ---
-  decomp time:          48537ms
-  parse time:           (incl. kmer gen, see kmer gen time)
-  kmer gen time:        0ms
-  sort time:            519401ms
-  rle time:             114220ms
-  write time:           46414ms
-  total wall time:      86.422s
-  peak RSS:             63081MB
-  ---
-  bucket count:         256
-  avg kmers/bucket:     32584308
-  max kmers/bucket:     247696823
-  hottest buckets:
-    bucket    0:  247696823 kmers  (2.97%)
-    bucket    3:  158376895 kmers  (1.90%)
-    bucket    2:  119732097 kmers  (1.44%)
-    bucket   32:  111920487 kmers  (1.34%)
-    bucket   12:  111717361 kmers  (1.34%)
-====================================
-	Command being timed: "/eight_TB/BigMQ/Users/Hua/kmer_counter/kite/target/release/kite count -k 31 -i /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz -o /dev/shm/kite_bench_out/kite_HG002_k31.kite --threads 48 --partitions 256 --max-memory-gb 64 --test-mode"
-	User time (seconds): 760.10
-	System time (seconds): 157.03
-	Percent of CPU this job got: 1053%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:27.04
-	Average shared text size (kbytes): 0
-	Average unshared data size (kbytes): 0
-	Average stack size (kbytes): 0
-	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 110493184
-	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 4280
-	Minor (reclaiming a frame) page faults: 17522574
-	Voluntary context switches: 22095
-	Involuntary context switches: 21717
-	Swaps: 0
-	File system inputs: 100288
-	File system outputs: 0
-	Socket messages sent: 0
-	Socket messages received: 0
-	Signals delivered: 0
-	Page size (bytes): 4096
-	Exit status: 0
-
---- kite HG002 k=51 ---
-Error: k must be between 1 and 32 (got 51)
-Command exited with non-zero status 1
-	Command being timed: "/eight_TB/BigMQ/Users/Hua/kmer_counter/kite/target/release/kite count -k 51 -i /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz -o /dev/shm/kite_bench_out/kite_HG002_k51.kite --threads 48 --partitions 256 --max-memory-gb 64 --test-mode"
-	User time (seconds): 0.00
-	System time (seconds): 0.00
-	Percent of CPU this job got: 100%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.00
-	Average shared text size (kbytes): 0
-	Average unshared data size (kbytes): 0
-	Average stack size (kbytes): 0
-	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 4888
-	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 0
-	Minor (reclaiming a frame) page faults: 124
-	Voluntary context switches: 1
-	Involuntary context switches: 1
-	Swaps: 0
-	File system inputs: 0
-	File system outputs: 0
-	Socket messages sent: 0
-	Socket messages received: 0
-	Signals delivered: 0
-	Page size (bytes): 4096
-	Exit status: 1

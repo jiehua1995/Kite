@@ -1,174 +1,0 @@
-=== KMC k=21 count START Fri 03 Apr 2026 11:29:57 PM CEST ===
-***********
-Stage 1: 0%Stage 1: 6%Stage 1: 13%Stage 1: 19%Stage 1: 26%Stage 1: 32%Stage 1: 39%Stage 1: 45%Stage 1: 52%Stage 1: 58%Stage 1: 65%Stage 1: 71%Stage 1: 78%Stage 1: 84%Stage 1: 91%Stage 1: 97%Stage 1: 100%
-Stage 2: 0%Stage 2: 1%Stage 2: 2%Stage 2: 3%Stage 2: 4%Stage 2: 5%Stage 2: 6%Stage 2: 7%Stage 2: 8%Stage 2: 9%Stage 2: 10%Stage 2: 11%Stage 2: 12%Stage 2: 13%Stage 2: 14%Stage 2: 15%Stage 2: 16%Stage 2: 17%Stage 2: 18%Stage 2: 19%Stage 2: 20%Stage 2: 21%Stage 2: 22%Stage 2: 23%Stage 2: 24%Stage 2: 25%Stage 2: 26%Stage 2: 27%Stage 2: 28%Stage 2: 29%Stage 2: 30%Stage 2: 31%Stage 2: 32%Stage 2: 33%Stage 2: 34%Stage 2: 35%Stage 2: 36%Stage 2: 37%Stage 2: 38%Stage 2: 39%Stage 2: 40%Stage 2: 41%Stage 2: 42%Stage 2: 43%Stage 2: 44%Stage 2: 45%Stage 2: 46%Stage 2: 47%Stage 2: 48%Stage 2: 49%Stage 2: 50%Stage 2: 51%Stage 2: 52%Stage 2: 53%Stage 2: 54%Stage 2: 55%Stage 2: 56%Stage 2: 57%Stage 2: 58%Stage 2: 59%Stage 2: 60%Stage 2: 61%Stage 2: 62%Stage 2: 63%Stage 2: 64%Stage 2: 65%Stage 2: 66%Stage 2: 67%Stage 2: 68%Stage 2: 69%Stage 2: 70%Stage 2: 71%Stage 2: 72%Stage 2: 73%Stage 2: 74%Stage 2: 75%Stage 2: 76%Stage 2: 77%Stage 2: 78%Stage 2: 79%Stage 2: 80%Stage 2: 81%Stage 2: 82%Stage 2: 83%Stage 2: 84%Stage 2: 85%Stage 2: 86%Stage 2: 87%Stage 2: 88%Stage 2: 89%Stage 2: 90%Stage 2: 91%Stage 2: 92%Stage 2: 93%Stage 2: 94%Stage 2: 95%Stage 2: 96%Stage 2: 97%Stage 2: 98%Stage 2: 99%Stage 2: 100%
-1st stage: 48.1148s
-2nd stage: 20.5832s
-Total    : 68.698s
-Tmp size : 11180MB
-
-Stats:
-   No. of k-mers below min. threshold :            0
-   No. of k-mers above max. threshold :            0
-   No. of unique k-mers               :   2711890002
-   No. of unique counted k-mers       :   2711890002
-   Total no. of k-mers                :   9009987754
-   Total no. of reads                 :     65170482
-   Total no. of super-k-mers          :   1368368609
-	Command being timed: "kmc -k21 -t48 -m64 -ci1 -cs65535 /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/temp/HG002_k21_kmc /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/temp/kmc_tmp"
-	User time (seconds): 847.19
-	System time (seconds): 91.42
-	Percent of CPU this job got: 1364%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:08.79
-	Average shared text size (kbytes): 0
-	Average unshared data size (kbytes): 0
-	Average stack size (kbytes): 0
-	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 53817080
-	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 0
-	Minor (reclaiming a frame) page faults: 19721021
-	Voluntary context switches: 262390
-	Involuntary context switches: 2389
-	Swaps: 0
-	File system inputs: 9816
-	File system outputs: 53629256
-	Socket messages sent: 0
-	Socket messages received: 0
-	Signals delivered: 0
-	Page size (bytes): 4096
-	Exit status: 0
-=== KMC k=21 count END Fri 03 Apr 2026 11:31:06 PM CEST ===
-=== KMC k=21 dump START Fri 03 Apr 2026 11:31:06 PM CEST ===
-	Command being timed: "kmc_dump /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/temp/HG002_k21_kmc /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/temp/HG002_k21_kmc.tsv"
-	User time (seconds): 141.91
-	System time (seconds): 54.90
-	Percent of CPU this job got: 99%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 3:17.60
-	Average shared text size (kbytes): 0
-	Average unshared data size (kbytes): 0
-	Average stack size (kbytes): 0
-	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 63300
-	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 0
-	Minor (reclaiming a frame) page faults: 15204
-	Voluntary context switches: 453
-	Involuntary context switches: 441
-	Swaps: 0
-	File system inputs: 0
-	File system outputs: 127195944
-	Socket messages sent: 0
-	Socket messages received: 0
-	Signals delivered: 0
-	Page size (bytes): 4096
-	Exit status: 0
-=== KMC k=21 dump END Fri 03 Apr 2026 11:34:23 PM CEST ===
-=== KMC k=31 count START Fri 03 Apr 2026 11:34:23 PM CEST ===
-***********
-Stage 1: 0%Stage 1: 6%Stage 1: 13%Stage 1: 19%Stage 1: 26%Stage 1: 32%Stage 1: 39%Stage 1: 45%Stage 1: 52%Stage 1: 58%Stage 1: 65%Stage 1: 71%Stage 1: 78%Stage 1: 84%Stage 1: 91%Stage 1: 97%Stage 1: 100%
-Stage 2: 0%Stage 2: 1%Stage 2: 2%Stage 2: 3%Stage 2: 4%Stage 2: 5%Stage 2: 6%Stage 2: 7%Stage 2: 8%Stage 2: 9%Stage 2: 10%Stage 2: 11%Stage 2: 12%Stage 2: 13%Stage 2: 14%Stage 2: 15%Stage 2: 16%Stage 2: 17%Stage 2: 18%Stage 2: 19%Stage 2: 20%Stage 2: 21%Stage 2: 22%Stage 2: 23%Stage 2: 24%Stage 2: 25%Stage 2: 26%Stage 2: 27%Stage 2: 28%Stage 2: 29%Stage 2: 30%Stage 2: 31%Stage 2: 32%Stage 2: 33%Stage 2: 34%Stage 2: 35%Stage 2: 36%Stage 2: 37%Stage 2: 38%Stage 2: 39%Stage 2: 40%Stage 2: 41%Stage 2: 42%Stage 2: 43%Stage 2: 44%Stage 2: 45%Stage 2: 46%Stage 2: 47%Stage 2: 48%Stage 2: 49%Stage 2: 50%Stage 2: 51%Stage 2: 52%Stage 2: 53%Stage 2: 54%Stage 2: 55%Stage 2: 56%Stage 2: 57%Stage 2: 58%Stage 2: 59%Stage 2: 60%Stage 2: 61%Stage 2: 62%Stage 2: 63%Stage 2: 64%Stage 2: 65%Stage 2: 66%Stage 2: 67%Stage 2: 68%Stage 2: 69%Stage 2: 70%Stage 2: 71%Stage 2: 72%Stage 2: 73%Stage 2: 74%Stage 2: 75%Stage 2: 76%Stage 2: 77%Stage 2: 78%Stage 2: 79%Stage 2: 80%Stage 2: 81%Stage 2: 82%Stage 2: 83%Stage 2: 84%Stage 2: 85%Stage 2: 86%Stage 2: 87%Stage 2: 88%Stage 2: 89%Stage 2: 90%Stage 2: 91%Stage 2: 92%Stage 2: 93%Stage 2: 94%Stage 2: 95%Stage 2: 96%Stage 2: 97%Stage 2: 98%Stage 2: 99%Stage 2: 100%
-1st stage: 43.9179s
-2nd stage: 27.7304s
-Total    : 71.6483s
-Tmp size : 8640MB
-
-Stats:
-   No. of k-mers below min. threshold :            0
-   No. of k-mers above max. threshold :            0
-   No. of unique k-mers               :   3101811337
-   No. of unique counted k-mers       :   3101811337
-   Total no. of k-mers                :   8341582924
-   Total no. of reads                 :     65170482
-   Total no. of super-k-mers          :    733855984
-	Command being timed: "kmc -k31 -t48 -m64 -ci1 -cs65535 /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/temp/HG002_k31_kmc /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/temp/kmc_tmp"
-	User time (seconds): 641.45
-	System time (seconds): 135.66
-	Percent of CPU this job got: 1083%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:11.72
-	Average shared text size (kbytes): 0
-	Average unshared data size (kbytes): 0
-	Average stack size (kbytes): 0
-	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 62534620
-	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 0
-	Minor (reclaiming a frame) page faults: 22165574
-	Voluntary context switches: 234920
-	Involuntary context switches: 2237
-	Swaps: 0
-	File system inputs: 0
-	File system outputs: 65477080
-	Socket messages sent: 0
-	Socket messages received: 0
-	Signals delivered: 0
-	Page size (bytes): 4096
-	Exit status: 0
-=== KMC k=31 count END Fri 03 Apr 2026 11:35:36 PM CEST ===
-=== KMC k=31 dump START Fri 03 Apr 2026 11:35:36 PM CEST ===
-	Command being timed: "kmc_dump /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/temp/HG002_k31_kmc /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/temp/HG002_k31_kmc.tsv"
-	User time (seconds): 234.92
-	System time (seconds): 115.25
-	Percent of CPU this job got: 19%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 29:58.05
-	Average shared text size (kbytes): 0
-	Average unshared data size (kbytes): 0
-	Average stack size (kbytes): 0
-	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 92232
-	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 12
-	Minor (reclaiming a frame) page faults: 67887
-	Voluntary context switches: 14438
-	Involuntary context switches: 1516
-	Swaps: 0
-	File system inputs: 8790048
-	File system outputs: 206029720
-	Socket messages sent: 0
-	Socket messages received: 0
-	Signals delivered: 0
-	Page size (bytes): 4096
-	Exit status: 0
-=== KMC k=31 dump END Sat 04 Apr 2026 12:05:34 AM CEST ===
-=== KMC k=51 count START Sat 04 Apr 2026 12:05:34 AM CEST ===
-***********
-Stage 1: 0%Stage 1: 6%Stage 1: 13%Stage 1: 19%Stage 1: 26%Stage 1: 32%Stage 1: 39%Stage 1: 45%Stage 1: 52%Stage 1: 58%Stage 1: 65%Stage 1: 71%Stage 1: 78%Stage 1: 84%Stage 1: 91%Stage 1: 97%Stage 1: 100%
-Stage 2: 0%Stage 2: 1%Stage 2: 2%Stage 2: 3%Stage 2: 4%Stage 2: 5%Stage 2: 6%Stage 2: 7%Stage 2: 8%Stage 2: 9%Stage 2: 10%Stage 2: 11%Stage 2: 12%Stage 2: 13%Stage 2: 14%Stage 2: 15%Stage 2: 16%Stage 2: 17%Stage 2: 18%Stage 2: 19%Stage 2: 20%Stage 2: 21%Stage 2: 22%Stage 2: 23%Stage 2: 24%Stage 2: 25%Stage 2: 26%Stage 2: 27%Stage 2: 28%Stage 2: 29%Stage 2: 30%Stage 2: 31%Stage 2: 32%Stage 2: 33%Stage 2: 34%Stage 2: 35%Stage 2: 36%Stage 2: 37%Stage 2: 38%Stage 2: 39%Stage 2: 40%Stage 2: 41%Stage 2: 42%Stage 2: 43%Stage 2: 44%Stage 2: 45%Stage 2: 46%Stage 2: 47%Stage 2: 48%Stage 2: 49%Stage 2: 50%Stage 2: 51%Stage 2: 52%Stage 2: 53%Stage 2: 54%Stage 2: 55%Stage 2: 56%Stage 2: 57%Stage 2: 58%Stage 2: 59%Stage 2: 60%Stage 2: 61%Stage 2: 62%Stage 2: 63%Stage 2: 64%Stage 2: 65%Stage 2: 66%Stage 2: 67%Stage 2: 68%Stage 2: 69%Stage 2: 70%Stage 2: 71%Stage 2: 72%Stage 2: 73%Stage 2: 74%Stage 2: 75%Stage 2: 76%Stage 2: 77%Stage 2: 78%Stage 2: 79%Stage 2: 80%Stage 2: 81%Stage 2: 82%Stage 2: 83%Stage 2: 84%Stage 2: 85%Stage 2: 86%Stage 2: 87%Stage 2: 88%Stage 2: 89%Stage 2: 90%Stage 2: 91%Stage 2: 92%Stage 2: 93%Stage 2: 94%Stage 2: 95%Stage 2: 96%Stage 2: 97%Stage 2: 98%Stage 2: 99%Stage 2: 100%
-1st stage: 69.5916s
-2nd stage: 688.961s
-Total    : 758.552s
-Tmp size : 6794MB
-
-Stats:
-   No. of k-mers below min. threshold :            0
-   No. of k-mers above max. threshold :            0
-   No. of unique k-mers               :   3333065244
-   No. of unique counted k-mers       :   3333065244
-   Total no. of k-mers                :   7015489985
-   Total no. of reads                 :     65170482
-   Total no. of super-k-mers          :    362309461
-	Command being timed: "kmc -k51 -t48 -m64 -ci1 -cs65535 /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/test/HG002_sample.fastq.gz /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/temp/HG002_k51_kmc /eight_TB/BigMQ/Users/Hua/kmer_counter/kite/temp/kmc_tmp"
-	User time (seconds): 725.92
-	System time (seconds): 168.58
-	Percent of CPU this job got: 117%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 12:38.67
-	Average shared text size (kbytes): 0
-	Average unshared data size (kbytes): 0
-	Average stack size (kbytes): 0
-	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 57200668
-	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 32
-	Minor (reclaiming a frame) page faults: 29995218
-	Voluntary context switches: 258665
-	Involuntary context switches: 2926
-	Swaps: 0
-	File system inputs: 3585960
-	File system outputs: 98035200
-	Socket messages sent: 0
-	Socket messages received: 0
-	Signals delivered: 0
-	Page size (bytes): 4096
-	Exit status: 0
-=== KMC k=51 count END Sat 04 Apr 2026 12:18:12 AM CEST ===
-=== KMC k=51 dump START Sat 04 Apr 2026 12:18:12 AM CEST ===
