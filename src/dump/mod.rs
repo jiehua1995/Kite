@@ -6,35 +6,27 @@ pub mod writer;
 pub mod worker;
 pub mod merge;
 
-use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use rayon::prelude::*;
 
 use crate::cli::DumpArgs;
-use crate::dump::merge::stream_partition_slabs;
+use crate::dump::merge::{measure_partition_output, stream_partition_slabs, PartitionOutputMeasure};
 use crate::dump::reader::KiteReader;
-use crate::dump::writer::append_file_sendfile;
+use crate::dump::writer::{AsyncPwriteWriter, DUMP_SLAB_BYTES};
 use crate::stats::DumpStats;
 
-struct ShardPlan {
-    shard_id: usize,
+struct WorkerPlan {
     start_partition: usize,
     end_partition: usize,
-    total_data_bytes: u64,
-}
-
-struct ShardOutput {
-    shard_id: usize,
-    path: String,
+    total_output_bytes: u64,
 }
 
 pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     let n_threads = if args.threads == 0 { num_cpus::get() } else { args.threads };
-    let slab_bytes = (args.io_buf_mb.max(1) * 1024 * 1024).max(128 * 1024);
+    let slab_bytes = (args.io_buf_mb.max(32) * 1024 * 1024).max(DUMP_SLAB_BYTES);
     let collect_timing = args.test_mode;
 
     let wall_start = Instant::now();
@@ -60,37 +52,48 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     };
     stats.set_partition_distribution(hottest, coldest, p99_chunk_bytes);
 
-    let shard_count = n_threads.clamp(1, n_partitions.max(1));
-    let shard_plans = build_shard_plans(&reader, shard_count);
-    let hottest_shard_partitions = shard_plans
+    let worker_count = n_threads.clamp(1, n_partitions.max(1));
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_count.max(1))
+        .build()?;
+
+    let measure_results = pool.install(|| {
+        (0..n_partitions)
+            .into_par_iter()
+            .map(|partition_id| measure_partition_output(partition_id, &reader, k, entry_size))
+            .collect::<Vec<_>>()
+    });
+    let partition_measures: Vec<PartitionOutputMeasure> = measure_results
+        .into_iter()
+        .collect::<std::io::Result<Vec<_>>>()?;
+
+    let mut partition_offsets = vec![0u64; n_partitions];
+    let mut total_tsv_bytes = 0u64;
+    for (partition_id, measure) in partition_measures.iter().enumerate() {
+        partition_offsets[partition_id] = total_tsv_bytes;
+        total_tsv_bytes = total_tsv_bytes.saturating_add(measure.bytes);
+    }
+
+    let worker_plans = build_worker_plans(&partition_measures, worker_count);
+    let hottest_shard_partitions = worker_plans
         .iter()
         .map(|s| (s.end_partition - s.start_partition) as u64)
         .max()
         .unwrap_or(0);
-    let coldest_shard_partitions = shard_plans
+    let coldest_shard_partitions = worker_plans
         .iter()
         .map(|s| (s.end_partition - s.start_partition) as u64)
         .min()
         .unwrap_or(0);
-    let hottest_shard_bytes = shard_plans.iter().map(|s| s.total_data_bytes).max().unwrap_or(0);
-    let coldest_shard_bytes = shard_plans.iter().map(|s| s.total_data_bytes).min().unwrap_or(0);
+    let hottest_shard_bytes = worker_plans.iter().map(|s| s.total_output_bytes).max().unwrap_or(0);
+    let coldest_shard_bytes = worker_plans.iter().map(|s| s.total_output_bytes).min().unwrap_or(0);
     stats.set_shard_distribution(
-        shard_plans.len() as u64,
+        worker_plans.len() as u64,
         hottest_shard_partitions,
         coldest_shard_partitions,
         hottest_shard_bytes,
         coldest_shard_bytes,
     );
-
-    if args.test_mode {
-        eprintln!("[kite dump] opening: {}", args.input);
-        eprintln!("[kite dump] k={}, partitions={}, total_chunks={}", k, n_partitions, total_chunks);
-        eprintln!(
-            "[kite dump] slab_bytes={}, shards={}, mode=partition-range-shards+sendfile",
-            slab_bytes,
-            shard_plans.len(),
-        );
-    }
 
     if args.output == "-" {
         let stdout = std::io::stdout();
@@ -120,83 +123,83 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     }
 
     let output_path = args.output.clone();
-    let local_tmp_dir = Path::new("/eight_TB/BigMQ/Users/Hua/kmer_counter/kite/temp");
-    std::fs::create_dir_all(local_tmp_dir)?;
-    let stem = Path::new(&output_path)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "dump".to_string());
-    let pid = std::process::id();
-    let prefix = local_tmp_dir.join(format!("kite_dump_{}_{}", pid, stem));
-    let prefix = prefix.to_string_lossy().into_owned();
+    let async_writer = Arc::new(AsyncPwriteWriter::create(
+        &output_path,
+        total_tsv_bytes,
+        collect_timing,
+        Arc::clone(&stats),
+    )?);
 
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(shard_plans.len().max(1))
-        .build()?;
+    if args.test_mode {
+        eprintln!("[kite dump] opening: {}", args.input);
+        eprintln!("[kite dump] k={}, partitions={}, total_chunks={}", k, n_partitions, total_chunks);
+        eprintln!(
+            "[kite dump] slab_bytes={}, workers={}, io_writers={}, queue_mb={}, mode=partition-offsets+async-pwrite",
+            slab_bytes,
+            worker_plans.len(),
+            async_writer.io_writers(),
+            async_writer.queue_bytes_limit() / 1024 / 1024,
+        );
+        eprintln!(
+            "[kite dump] final_tsv_bytes={:.2} GB",
+            total_tsv_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+        );
+    }
 
     let stats_work = Arc::clone(&stats);
     let reader_work = Arc::clone(&reader);
-    let outputs = pool.install(|| {
-        shard_plans
+    let writer_work = Arc::clone(&async_writer);
+    let partition_offsets = Arc::new(partition_offsets);
+    let partition_measures = Arc::new(partition_measures);
+    let worker_results = pool.install(|| {
+        worker_plans
             .into_par_iter()
-            .map(|shard| -> anyhow::Result<ShardOutput> {
-                let shard_path = format!("{}.shard{:03}", prefix, shard.shard_id);
-                let file = File::create(&shard_path)
-                    .map_err(|e| anyhow::anyhow!("create shard '{}': {}", shard_path, e))?;
-                let mut out = BufWriter::with_capacity(slab_bytes.max(8 * 1024 * 1024), file);
-
-                for partition_id in shard.start_partition..shard.end_partition {
+            .map(|worker| -> anyhow::Result<()> {
+                for partition_id in worker.start_partition..worker.end_partition {
                     let read_bytes: u64 = reader_work.partition_chunks[partition_id]
                         .iter()
                         .map(|c| c.payload_len as u64)
                         .sum();
                     stats_work.add_read(read_bytes);
 
+                    let partition_base = partition_offsets[partition_id];
+                    let partition_end = partition_base + partition_measures[partition_id].bytes;
+                    let mut next_offset = partition_base;
+
                     stream_partition_slabs(partition_id, &reader_work, k, entry_size, slab_bytes, collect_timing, &stats_work, |bytes, rows| {
-                        let t_write = collect_timing.then(Instant::now);
-                        out.write_all(&bytes)?;
-                        if let Some(t_write) = t_write {
-                            stats_work.add_writer_io_ns(t_write.elapsed().as_nanos() as u64);
-                        }
+                        let offset = next_offset;
+                        let bytes_len = bytes.len() as u64;
+                        next_offset = next_offset.saturating_add(bytes_len);
+                        writer_work.submit(offset, bytes)?;
                         stats_work.add_rows(rows);
-                        stats_work.add_written(bytes.len() as u64);
+                        stats_work.add_written(bytes_len);
                         Ok(())
                     }).map_err(anyhow::Error::from)?;
+
+                    if next_offset != partition_end {
+                        anyhow::bail!(
+                            "partition {} output bytes mismatch: expected {}, wrote {}",
+                            partition_id,
+                            partition_measures[partition_id].bytes,
+                            next_offset - partition_base,
+                        );
+                    }
                     stats_work.inc_partitions();
                 }
-
-                out.flush().map_err(anyhow::Error::from)?;
-                Ok(ShardOutput {
-                    shard_id: shard.shard_id,
-                    path: shard_path,
-                })
+                Ok(())
             })
-            .collect::<anyhow::Result<Vec<_>>>()
-    })?;
+            .collect::<Vec<_>>()
+    });
 
-    if args.progress {
-        eprintln!("  [dump] shard workers done, starting sendfile concat");
+    for result in worker_results {
+        result?;
     }
 
-    let mut outputs = outputs;
-    outputs.sort_unstable_by_key(|shard| shard.shard_id);
+    drop(writer_work);
 
-    let t_concat = collect_timing.then(Instant::now);
-    let final_out = File::create(&output_path)?;
-    for shard in &outputs {
-        let shard_in = File::open(&shard.path)
-            .map_err(|e| anyhow::anyhow!("open shard '{}': {}", shard.path, e))?;
-        append_file_sendfile(&final_out, &shard_in)
-            .map_err(|e| anyhow::anyhow!("sendfile shard '{}': {}", shard.path, e))?;
-        let _ = std::fs::remove_file(&shard.path);
-    }
-    if let Some(t_concat) = t_concat {
-        stats.add_concat_ns(t_concat.elapsed().as_nanos() as u64);
-    }
-
-    if args.progress {
-        eprintln!("  [dump] sendfile concat done");
-    }
+    let async_writer = Arc::try_unwrap(async_writer)
+        .map_err(|_| anyhow::anyhow!("dump async writer still has outstanding references"))?;
+    async_writer.finish()?;
 
     let wall = wall_start.elapsed();
     if args.test_mode {
@@ -207,51 +210,64 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_shard_plans(reader: &KiteReader, requested_shards: usize) -> Vec<ShardPlan> {
-    let partition_count = reader.partition_entries.len();
+fn build_worker_plans(measures: &[PartitionOutputMeasure], requested_workers: usize) -> Vec<WorkerPlan> {
+    let partition_count = measures.len();
     if partition_count == 0 {
         return Vec::new();
     }
 
-    let shard_count = requested_shards.clamp(1, partition_count);
+    let worker_count = requested_workers.clamp(1, partition_count);
 
-    let total_bytes: u64 = reader.partition_entries.iter().map(|p| p.data_bytes).sum();
-    let target_bytes = ((total_bytes + shard_count as u64 - 1) / shard_count as u64).max(1);
-    let mut plans = Vec::with_capacity(shard_count);
-    let mut start = 0usize;
-
-    for shard_id in 0..shard_count {
-        if start >= partition_count {
-            break;
-        }
-
-        let remaining_shards = shard_count - shard_id;
-        let max_end = partition_count - (remaining_shards - 1);
-        let mut end = start;
-        let mut bytes = 0u64;
-
-        while end < max_end {
-            let next_bytes = reader.partition_entries[end].data_bytes;
-            if end > start && bytes >= target_bytes {
-                break;
-            }
-            bytes += next_bytes;
-            end += 1;
-        }
-
-        if end == start {
-            bytes = reader.partition_entries[start].data_bytes;
-            end = start + 1;
-        }
-
-        plans.push(ShardPlan {
-            shard_id,
-            start_partition: start,
-            end_partition: end,
-            total_data_bytes: bytes,
-        });
-        start = end;
+    let mut prefix_bytes = vec![0u64; partition_count + 1];
+    for (idx, measure) in measures.iter().enumerate() {
+        prefix_bytes[idx + 1] = prefix_bytes[idx].saturating_add(measure.bytes);
     }
 
-    plans
+    let inf = u64::MAX;
+    let mut best_max = vec![vec![inf; partition_count + 1]; worker_count + 1];
+    let mut cut_at = vec![vec![0usize; partition_count + 1]; worker_count + 1];
+    best_max[0][0] = 0;
+
+    for groups in 1..=worker_count {
+        for end in groups..=partition_count {
+            let mut best_cost = inf;
+            let mut best_start = groups - 1;
+
+            for start in (groups - 1)..end {
+                let previous = best_max[groups - 1][start];
+                if previous == inf {
+                    continue;
+                }
+
+                let segment_bytes = prefix_bytes[end].saturating_sub(prefix_bytes[start]);
+                let cost = previous.max(segment_bytes);
+
+                if cost < best_cost {
+                    best_cost = cost;
+                    best_start = start;
+                }
+            }
+
+            best_max[groups][end] = best_cost;
+            cut_at[groups][end] = best_start;
+        }
+    }
+
+    let mut ranges_rev = Vec::with_capacity(worker_count);
+    let mut end = partition_count;
+    let mut groups = worker_count;
+    while groups > 0 {
+        let start = cut_at[groups][end];
+        let total_output_bytes = prefix_bytes[end].saturating_sub(prefix_bytes[start]);
+        ranges_rev.push(WorkerPlan {
+            start_partition: start,
+            end_partition: end,
+            total_output_bytes,
+        });
+        end = start;
+        groups -= 1;
+    }
+
+    ranges_rev.reverse();
+    ranges_rev
 }

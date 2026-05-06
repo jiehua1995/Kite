@@ -95,7 +95,7 @@ pub struct DumpArgs {
     #[arg(long = "test-mode")]
     pub test_mode: bool,
 
-    /// I/O buffer size in MB for output writing (larger = fewer syscalls)
-    #[arg(long = "io-buf-mb", default_value_t = 16)]
+    /// Slab size in MB for dump workers (clamped to 32 MB minimum for async pwrite)
+    #[arg(long = "io-buf-mb", default_value_t = 32)]
     pub io_buf_mb: usize,
 }

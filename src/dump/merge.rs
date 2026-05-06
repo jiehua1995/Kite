@@ -6,6 +6,10 @@ use crate::dump::loser_tree::LoserTreeMerger;
 use crate::dump::reader::{ChunkLocation, KiteReader};
 use crate::stats::DumpStats;
 
+pub struct PartitionOutputMeasure {
+    pub bytes: u64,
+}
+
 struct MmapRunIter {
     _reader: Arc<KiteReader>,
     base: *const u8,
@@ -131,6 +135,70 @@ fn build_partition_merger(
         }
     }
     Ok(LoserTreeMerger::new(streams))
+}
+
+#[inline]
+fn count_digits_u32(mut value: u32) -> u64 {
+    let mut digits = 1u64;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+#[inline]
+fn tsv_line_bytes(k: u8, count: u32) -> u64 {
+    k as u64 + 2 + count_digits_u32(count)
+}
+
+pub fn measure_partition_output(
+    partition_id: usize,
+    reader: &Arc<KiteReader>,
+    k: u8,
+    entry_size: usize,
+) -> std::io::Result<PartitionOutputMeasure> {
+    let partition_chunks = &reader.partition_chunks[partition_id];
+    if partition_chunks.is_empty() {
+        return Ok(PartitionOutputMeasure { bytes: 0 });
+    }
+
+    if entry_size == 36 {
+        let total_entries: usize = partition_chunks.iter().map(|c| c.row_count as usize).sum();
+        let mut all: Vec<(u128, u128, u32)> = Vec::with_capacity(total_entries);
+        for loc in partition_chunks {
+            let slice = reader.run_data_slice(loc);
+            for i in 0..loc.row_count as usize {
+                let off = i * 36;
+                let lo = u128::from_le_bytes(slice[off..off + 16].try_into().unwrap());
+                let hi = u128::from_le_bytes(slice[off + 16..off + 32].try_into().unwrap());
+                let cnt = u32::from_le_bytes(slice[off + 32..off + 36].try_into().unwrap());
+                all.push((hi, lo, cnt));
+            }
+        }
+        all.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+        let mut bytes = 0u64;
+        let mut i = 0usize;
+        while i < all.len() {
+            let (hi, lo, mut acc) = all[i];
+            let mut j = i + 1;
+            while j < all.len() && all[j].0 == hi && all[j].1 == lo {
+                acc = acc.saturating_add(all[j].2);
+                j += 1;
+            }
+            bytes += tsv_line_bytes(k, acc);
+            i = j;
+        }
+        return Ok(PartitionOutputMeasure { bytes });
+    }
+
+    let mut merger = build_partition_merger(partition_chunks, reader, entry_size)?;
+    let mut bytes = 0u64;
+    while let Some((_key, count)) = merger.next_min() {
+        bytes += tsv_line_bytes(k, count);
+    }
+    Ok(PartitionOutputMeasure { bytes })
 }
 
 pub fn stream_partition_slabs<F>(
