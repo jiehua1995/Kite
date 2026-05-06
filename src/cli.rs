@@ -27,16 +27,36 @@ impl CountMode {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum CitationFormat {
+    Text,
+    Bibtex,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum CorrelationMode {
+    All,
+    Pearson,
+    Cosine,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum EmbeddingMode {
+    All,
+    Pca,
+    Tsne,
+    Umap,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "kite",
-    about = "High-performance k-mer counter",
+    about = "High-performance k-mer database toolkit",
     version,
     disable_version_flag = true
 )]
 pub struct Cli {
-    /// Show version information
-    #[arg(short = 'v', long = "version", action = ArgAction::Version, global = true)]
+    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
     _version: Option<bool>,
 
     #[command(subcommand)]
@@ -45,82 +65,192 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Count k-mers from FASTQ input
     Count(CountArgs),
-    /// Dump k-mer counts from .kite file to TSV
     Dump(DumpArgs),
+    Info(InfoArgs),
+    Query(QueryArgs),
+    Histo(HistoArgs),
+    Merge(MergeArgs),
+    Profile(ProfileArgs),
+    Analyze(AnalyzeArgs),
+    Citation(CitationArgs),
+    Fly(FlyArgs),
 }
 
 #[derive(Args, Debug)]
 pub struct CountArgs {
-    /// K-mer length (1–31 uses u64, 32–64 uses u128)
     #[arg(short = 'k', long = "kmer", default_value_t = 21)]
     pub k: u8,
-
-    /// Input FASTQ file (.fastq, .fq, .fastq.gz, .fq.gz)
     #[arg(short = 'i', long = "input")]
     pub input: String,
-
-    /// Output .kite file path
     #[arg(short = 'o', long = "output")]
     pub output: String,
-
-    /// Number of threads (0 = auto-detect)
-    #[arg(long = "threads", default_value_t = 0)]
+    #[arg(short = 't', long = "threads", default_value_t = 0)]
     pub threads: usize,
-
-    /// Number of partitions/buckets (0 = auto; otherwise must be power of 2)
     #[arg(long = "partitions", default_value_t = 0)]
     pub partitions: usize,
-
-    /// K-mers per chunk (controls batch size, flush frequency, and run granularity)
     #[arg(long = "chunk-kmers", default_value_t = 8_000_000)]
     pub chunk_kmers: usize,
-
-    /// Maximum memory budget in GB (0 = auto-detect and use almost all physical memory)
-    #[arg(long = "max-memory-gb", default_value_t = 0.0)]
-    pub max_memory_gb: f64,
-
-    /// Count canonical k-mers (min of forward and reverse complement)
+    #[arg(long = "memory", value_name = "SIZE")]
+    pub memory: Option<String>,
     #[arg(long = "canonical", default_value_t = true)]
     pub canonical: bool,
-
-    /// Show progress during counting
-    #[arg(long = "progress")]
+    #[arg(short = 'p', long = "progress")]
     pub progress: bool,
-
-    /// Enable detailed test-mode diagnostics output
     #[arg(long = "test-mode")]
     pub test_mode: bool,
-
-    /// Output mode hint. Current Plan04 baseline uses DVLE-only for u64/u128 hot paths.
     #[arg(long = "mode", value_enum, default_value_t = CountMode::Fast)]
     pub mode: CountMode,
-
-    /// Per-partition staging buffer in MB for .kite pwrite batching (clamped to 4-32 MB)
-    #[arg(long = "io-buf-mb", default_value_t = 16)]
-    pub io_buf_mb: usize,
+    #[arg(long = "buffer", default_value_t = 16, value_name = "MB")]
+    pub buffer: usize,
 }
 
 #[derive(Args, Debug)]
 pub struct DumpArgs {
-    /// Input .kite file
     #[arg(short = 'i', long = "input")]
     pub input: String,
-
-    /// Output TSV file path (- for stdout)
     #[arg(short = 'o', long = "output")]
     pub output: String,
-
-    /// Number of threads (0 = auto-detect)
-    #[arg(long = "threads", default_value_t = 0)]
+    #[arg(short = 't', long = "threads", default_value_t = 0)]
     pub threads: usize,
-
-    /// Show progress during dumping
-    #[arg(long = "progress")]
+    #[arg(short = 'p', long = "progress")]
     pub progress: bool,
+    #[arg(long = "test-mode")]
+    pub test_mode: bool,
+}
 
-    /// Enable detailed test-mode diagnostics output
+#[derive(Args, Debug)]
+pub struct InfoArgs {
+    #[arg(value_name = "INPUT")]
+    pub input: String,
+    #[arg(long = "test-mode")]
+    pub test_mode: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct QueryArgs {
+    #[arg(value_name = "INPUT")]
+    pub input: String,
+    #[arg(value_name = "KMER")]
+    pub kmer: String,
+    #[arg(long = "test-mode")]
+    pub test_mode: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct HistoArgs {
+    #[arg(short = 'i', long = "input", required = true, num_args = 1..)]
+    pub inputs: Vec<String>,
+    #[arg(short = 'o', long = "output")]
+    pub output: String,
+    #[arg(long = "label", num_args = 1.., action = ArgAction::Set)]
+    pub labels: Option<Vec<String>>,
+    #[arg(short = 'p', long = "progress")]
+    pub progress: bool,
+    #[arg(long = "test-mode")]
+    pub test_mode: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct MergeArgs {
+    #[arg(short = 'i', long = "input", required = true, num_args = 2..)]
+    pub inputs: Vec<String>,
+    #[arg(short = 'o', long = "output")]
+    pub output: String,
+    #[arg(short = 'p', long = "progress")]
+    pub progress: bool,
+    #[arg(long = "test-mode")]
+    pub test_mode: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ProfileArgs {
+    #[arg(short = 'i', long = "input", required = true, num_args = 1..)]
+    pub inputs: Vec<String>,
+    #[arg(short = 'o', long = "output")]
+    pub output: String,
+    #[arg(long = "label", num_args = 1.., action = ArgAction::Set)]
+    pub labels: Option<Vec<String>>,
+    #[arg(short = 'p', long = "progress")]
+    pub progress: bool,
+    #[arg(long = "test-mode")]
+    pub test_mode: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AnalyzeArgs {
+    #[arg(short = 'i', long = "input", required = true, num_args = 1..)]
+    pub inputs: Vec<String>,
+    #[arg(short = 'o', long = "output-dir")]
+    pub output_dir: String,
+    #[arg(long = "label", num_args = 1.., action = ArgAction::Set)]
+    pub labels: Option<Vec<String>>,
+    #[arg(long = "top-variable-kmers", default_value_t = 5000)]
+    pub top_variable_kmers: usize,
+    #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::All)]
+    pub correlation: CorrelationMode,
+    #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::All)]
+    pub embedding: EmbeddingMode,
+    #[arg(long = "heatmap-kmeans", default_value_t = 6)]
+    pub heatmap_kmeans: usize,
+    #[arg(long = "heatmap-seed", default_value_t = 1)]
+    pub heatmap_seed: u64,
+    #[arg(
+        long = "cluster-samples",
+        default_value_t = true,
+        action = ArgAction::Set,
+        value_name = "BOOL"
+    )]
+    pub cluster_samples: bool,
+    #[arg(short = 'p', long = "progress")]
+    pub progress: bool,
+    #[arg(long = "test-mode")]
+    pub test_mode: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct CitationArgs {
+    #[arg(short = 'o', long = "output", default_value = "-")]
+    pub output: String,
+    #[arg(long = "format", value_enum, default_value_t = CitationFormat::Text)]
+    pub format: CitationFormat,
+    #[arg(long = "test-mode")]
+    pub test_mode: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct FlyArgs {
+    #[arg(short = 'i', long = "input", required = true, num_args = 1..)]
+    pub inputs: Vec<String>,
+    #[arg(short = 'o', long = "output-dir")]
+    pub output_dir: String,
+    #[arg(long = "label", num_args = 1.., action = ArgAction::Set)]
+    pub labels: Option<Vec<String>>,
+    #[arg(short = 'k', long = "kmer", default_value_t = 31)]
+    pub k: u8,
+    #[arg(short = 't', long = "threads", default_value_t = 0)]
+    pub threads: usize,
+    #[arg(long = "memory", value_name = "SIZE")]
+    pub memory: Option<String>,
+    #[arg(long = "top-variable-kmers", default_value_t = 5000)]
+    pub top_variable_kmers: usize,
+    #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::All)]
+    pub correlation: CorrelationMode,
+    #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::All)]
+    pub embedding: EmbeddingMode,
+    #[arg(long = "heatmap-kmeans", default_value_t = 6)]
+    pub heatmap_kmeans: usize,
+    #[arg(long = "heatmap-seed", default_value_t = 1)]
+    pub heatmap_seed: u64,
+    #[arg(
+        long = "cluster-samples",
+        default_value_t = true,
+        action = ArgAction::Set,
+        value_name = "BOOL"
+    )]
+    pub cluster_samples: bool,
+    #[arg(short = 'p', long = "progress")]
+    pub progress: bool,
     #[arg(long = "test-mode")]
     pub test_mode: bool,
 }

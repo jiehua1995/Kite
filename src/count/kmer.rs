@@ -1,10 +1,14 @@
 /// 2-bit encoding: A=0, C=1, G=2, T=3, invalid=255
 static BASE_ENCODE: [u8; 256] = {
     let mut t = [255u8; 256];
-    t[b'A' as usize] = 0; t[b'a' as usize] = 0;
-    t[b'C' as usize] = 1; t[b'c' as usize] = 1;
-    t[b'G' as usize] = 2; t[b'g' as usize] = 2;
-    t[b'T' as usize] = 3; t[b't' as usize] = 3;
+    t[b'A' as usize] = 0;
+    t[b'a' as usize] = 0;
+    t[b'C' as usize] = 1;
+    t[b'c' as usize] = 1;
+    t[b'G' as usize] = 2;
+    t[b'g' as usize] = 2;
+    t[b'T' as usize] = 3;
+    t[b't' as usize] = 3;
     t
 };
 
@@ -66,9 +70,13 @@ impl KmerWord for u64 {
         (self.wrapping_mul(0x9E3779B97F4A7C15u64) >> (64 - bucket_bits)) as usize
     }
     #[inline(always)]
-    fn byte_size() -> usize { 8 }
+    fn byte_size() -> usize {
+        8
+    }
     #[inline(always)]
-    fn entry_size() -> usize { 12 }
+    fn entry_size() -> usize {
+        12
+    }
     #[inline(always)]
     fn write_entry(self, count: u32, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.to_le_bytes());
@@ -80,7 +88,9 @@ impl KmerWord for u64 {
     }
     #[inline]
     fn scan_sequence(seq: &[u8], k: u8, canonical: bool, mut f: impl FnMut(u64)) {
-        for kmer in KmerIter::new(seq, k, canonical) { f(kmer); }
+        for kmer in KmerIter::new(seq, k, canonical) {
+            f(kmer);
+        }
     }
     #[inline]
     fn encode_dvle_run(entries: &[(u64, u32)], out: &mut Vec<u8>) -> bool {
@@ -105,9 +115,13 @@ impl KmerWord for u128 {
         ((lo ^ hi).wrapping_mul(0x9E3779B97F4A7C15u64) >> (64 - bucket_bits)) as usize
     }
     #[inline(always)]
-    fn byte_size() -> usize { 16 }
+    fn byte_size() -> usize {
+        16
+    }
     #[inline(always)]
-    fn entry_size() -> usize { 20 }
+    fn entry_size() -> usize {
+        20
+    }
     #[inline(always)]
     fn write_entry(self, count: u32, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.to_le_bytes());
@@ -119,7 +133,9 @@ impl KmerWord for u128 {
     }
     #[inline]
     fn scan_sequence(seq: &[u8], k: u8, canonical: bool, mut f: impl FnMut(u128)) {
-        for kmer in KmerIter128::new(seq, k, canonical) { f(kmer); }
+        for kmer in KmerIter128::new(seq, k, canonical) {
+            f(kmer);
+        }
     }
     #[inline]
     fn encode_dvle_run(entries: &[(u128, u32)], out: &mut Vec<u8>) -> bool {
@@ -144,9 +160,13 @@ impl KmerWord for KmerU256 {
         ((a ^ b).wrapping_mul(0x9E3779B97F4A7C15u64) >> (64 - bucket_bits)) as usize
     }
     #[inline(always)]
-    fn byte_size() -> usize { 32 }
+    fn byte_size() -> usize {
+        32
+    }
     #[inline(always)]
-    fn entry_size() -> usize { 36 } // 32B key + 4B count
+    fn entry_size() -> usize {
+        36
+    } // 32B key + 4B count
     #[inline(always)]
     fn write_entry(self, count: u32, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.lo.to_le_bytes());
@@ -159,11 +179,15 @@ impl KmerWord for KmerU256 {
     }
     #[inline]
     fn scan_sequence(seq: &[u8], k: u8, canonical: bool, mut f: impl FnMut(KmerU256)) {
-        for kmer in KmerIterU256::new(seq, k, canonical) { f(kmer); }
+        for kmer in KmerIterU256::new(seq, k, canonical) {
+            f(kmer);
+        }
     }
     #[inline]
     fn encode_dvle_run(entries: &[(KmerU256, u32)], out: &mut Vec<u8>) -> bool {
-        for &(key, count) in entries { key.write_entry(count, out); }
+        for &(key, count) in entries {
+            key.write_entry(count, out);
+        }
         false
     }
 
@@ -192,9 +216,22 @@ impl<'a> KmerIter<'a> {
     #[inline]
     pub fn new(seq: &'a [u8], k: u8, canonical: bool) -> Self {
         assert!(k >= 1 && k <= 32, "k must be 1..=32 for u64 path");
-        let mask = if k == 32 { u64::MAX } else { (1u64 << (2 * k as u32)) - 1 };
-        KmerIter { seq, pos: 0, fwd: 0, rev: 0, valid: 0, k, mask,
-                   shift: 2 * (k as u32 - 1), canonical }
+        let mask = if k == 32 {
+            u64::MAX
+        } else {
+            (1u64 << (2 * k as u32)) - 1
+        };
+        KmerIter {
+            seq,
+            pos: 0,
+            fwd: 0,
+            rev: 0,
+            valid: 0,
+            k,
+            mask,
+            shift: 2 * (k as u32 - 1),
+            canonical,
+        }
     }
 }
 
@@ -204,15 +241,27 @@ impl<'a> Iterator for KmerIter<'a> {
     fn next(&mut self) -> Option<u64> {
         let k = self.k as u32;
         loop {
-            if self.pos >= self.seq.len() { return None; }
-            let b = self.seq[self.pos]; self.pos += 1;
+            if self.pos >= self.seq.len() {
+                return None;
+            }
+            let b = self.seq[self.pos];
+            self.pos += 1;
             let enc = BASE_ENCODE[b as usize];
-            if enc == 255 { self.fwd = 0; self.rev = 0; self.valid = 0; continue; }
+            if enc == 255 {
+                self.fwd = 0;
+                self.rev = 0;
+                self.valid = 0;
+                continue;
+            }
             self.fwd = ((self.fwd << 2) | enc as u64) & self.mask;
             self.rev = (self.rev >> 2) | (((enc ^ 3) as u64) << self.shift);
             self.valid += 1;
             if self.valid >= k {
-                return Some(if self.canonical { self.fwd.min(self.rev) } else { self.fwd });
+                return Some(if self.canonical {
+                    self.fwd.min(self.rev)
+                } else {
+                    self.fwd
+                });
             }
         }
     }
@@ -237,9 +286,22 @@ impl<'a> KmerIter128<'a> {
     #[inline]
     pub fn new(seq: &'a [u8], k: u8, canonical: bool) -> Self {
         assert!(k >= 1 && k <= 64, "k must be 1..=64 for u128 path");
-        let mask = if k == 64 { u128::MAX } else { (1u128 << (2 * k as u32)) - 1 };
-        KmerIter128 { seq, pos: 0, fwd: 0, rev: 0, valid: 0, k, mask,
-                      shift: 2 * (k as u32 - 1), canonical }
+        let mask = if k == 64 {
+            u128::MAX
+        } else {
+            (1u128 << (2 * k as u32)) - 1
+        };
+        KmerIter128 {
+            seq,
+            pos: 0,
+            fwd: 0,
+            rev: 0,
+            valid: 0,
+            k,
+            mask,
+            shift: 2 * (k as u32 - 1),
+            canonical,
+        }
     }
 }
 
@@ -249,15 +311,27 @@ impl<'a> Iterator for KmerIter128<'a> {
     fn next(&mut self) -> Option<u128> {
         let k = self.k as u32;
         loop {
-            if self.pos >= self.seq.len() { return None; }
-            let b = self.seq[self.pos]; self.pos += 1;
+            if self.pos >= self.seq.len() {
+                return None;
+            }
+            let b = self.seq[self.pos];
+            self.pos += 1;
             let enc = BASE_ENCODE[b as usize];
-            if enc == 255 { self.fwd = 0; self.rev = 0; self.valid = 0; continue; }
+            if enc == 255 {
+                self.fwd = 0;
+                self.rev = 0;
+                self.valid = 0;
+                continue;
+            }
             self.fwd = ((self.fwd << 2) | enc as u128) & self.mask;
             self.rev = (self.rev >> 2) | (((enc ^ 3) as u128) << self.shift);
             self.valid += 1;
             if self.valid >= k {
-                return Some(if self.canonical { self.fwd.min(self.rev) } else { self.fwd });
+                return Some(if self.canonical {
+                    self.fwd.min(self.rev)
+                } else {
+                    self.fwd
+                });
             }
         }
     }
@@ -292,13 +366,23 @@ impl<'a> KmerIterU256<'a> {
     pub fn new(seq: &'a [u8], k: u8, canonical: bool) -> Self {
         assert!(k >= 65 && k <= 128, "k must be 65..=128 for KmerU256 path");
         let hi_bits = 2 * k as u32 - 128;
-        let mask_hi = if hi_bits == 128 { u128::MAX } else { (1u128 << hi_bits) - 1 };
+        let mask_hi = if hi_bits == 128 {
+            u128::MAX
+        } else {
+            (1u128 << hi_bits) - 1
+        };
         let rev_top = 2 * (k as u32 - 1) - 128; // = 2k-2-128, always in [0..126]
         KmerIterU256 {
-            seq, pos: 0,
+            seq,
+            pos: 0,
             fwd: KmerU256 { hi: 0, lo: 0 },
             rev: KmerU256 { hi: 0, lo: 0 },
-            valid: 0, k, _hi_bits: hi_bits, mask_hi, rev_top, canonical,
+            valid: 0,
+            k,
+            _hi_bits: hi_bits,
+            mask_hi,
+            rev_top,
+            canonical,
         }
     }
 }
@@ -309,8 +393,11 @@ impl<'a> Iterator for KmerIterU256<'a> {
     fn next(&mut self) -> Option<KmerU256> {
         let k = self.k as u32;
         loop {
-            if self.pos >= self.seq.len() { return None; }
-            let b = self.seq[self.pos]; self.pos += 1;
+            if self.pos >= self.seq.len() {
+                return None;
+            }
+            let b = self.seq[self.pos];
+            self.pos += 1;
             let enc = BASE_ENCODE[b as usize];
             if enc == 255 {
                 self.fwd = KmerU256 { hi: 0, lo: 0 };
@@ -323,13 +410,13 @@ impl<'a> Iterator for KmerIterU256<'a> {
             // Forward: shift left by 2, insert enc at LSB of lo.
             // Carry = top 2 bits of lo that overflow into hi.
             let carry_fwd = self.fwd.lo >> 126;
-            self.fwd.lo  = (self.fwd.lo << 2) | (enc as u128);
-            self.fwd.hi  = ((self.fwd.hi << 2) | carry_fwd) & self.mask_hi;
+            self.fwd.lo = (self.fwd.lo << 2) | (enc as u128);
+            self.fwd.hi = ((self.fwd.hi << 2) | carry_fwd) & self.mask_hi;
 
             // Reverse complement: shift right by 2, insert rc_enc at bit rev_top of hi.
-            let carry_rev = self.rev.hi << 126;  // bottom 2 bits of hi → top 2 bits of lo
-            self.rev.hi  = (self.rev.hi >> 2) | ((rc_enc as u128) << self.rev_top);
-            self.rev.lo  = (self.rev.lo >> 2) | carry_rev;
+            let carry_rev = self.rev.hi << 126; // bottom 2 bits of hi → top 2 bits of lo
+            self.rev.hi = (self.rev.hi >> 2) | ((rc_enc as u128) << self.rev_top);
+            self.rev.lo = (self.rev.lo >> 2) | carry_rev;
 
             self.valid += 1;
             if self.valid >= k {
@@ -394,10 +481,22 @@ mod tests {
         let seq = b"ACGTACGTACGTACGTACGTA"; // 21 bases → 1 kmer
         let k1: Vec<u64> = KmerIter::new(seq, 21, true).collect();
         // Reverse complement of ACGTACGTACGTACGTACGTA
-        let rc: Vec<u8> = b"TACGTACGTACGTACGTACGT".iter().rev()
-            .map(|&b| match b { b'A' => b'T', b'T' => b'A', b'C' => b'G', b'G' => b'C', x => x }).collect();
+        let rc: Vec<u8> = b"TACGTACGTACGTACGTACGT"
+            .iter()
+            .rev()
+            .map(|&b| match b {
+                b'A' => b'T',
+                b'T' => b'A',
+                b'C' => b'G',
+                b'G' => b'C',
+                x => x,
+            })
+            .collect();
         let k2: Vec<u64> = KmerIter::new(&rc, 21, true).collect();
-        assert_eq!(k1, k2, "canonical kmer must equal that of reverse complement sequence");
+        assert_eq!(
+            k1, k2,
+            "canonical kmer must equal that of reverse complement sequence"
+        );
     }
 
     #[test]
@@ -405,7 +504,7 @@ mod tests {
         // Same as test_kmer_simple but via KmerIter128 — should produce identical values
         let seq = b"AACGT";
         let kmers128: Vec<u128> = KmerIter128::new(seq, 3, false).collect();
-        let kmers64: Vec<u64>  = KmerIter::new(seq, 3, false).collect();
+        let kmers64: Vec<u64> = KmerIter::new(seq, 3, false).collect();
         let as_u128: Vec<u128> = kmers64.iter().map(|&x| x as u128).collect();
         assert_eq!(kmers128, as_u128);
     }
@@ -427,11 +526,22 @@ mod tests {
         let seq = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACG";
         let fwd: Vec<u128> = KmerIter128::new(seq, 51, true).collect();
         // Build its reverse complement manually
-        let rc: Vec<u8> = seq.iter().rev()
-            .map(|&b| match b { b'A' => b'T', b'T' => b'A', b'C' => b'G', b'G' => b'C', x => x })
+        let rc: Vec<u8> = seq
+            .iter()
+            .rev()
+            .map(|&b| match b {
+                b'A' => b'T',
+                b'T' => b'A',
+                b'C' => b'G',
+                b'G' => b'C',
+                x => x,
+            })
             .collect();
         let rev: Vec<u128> = KmerIter128::new(&rc, 51, true).collect();
-        assert_eq!(fwd, rev, "canonical k=51 kmer must equal that of reverse complement sequence");
+        assert_eq!(
+            fwd, rev,
+            "canonical k=51 kmer must equal that of reverse complement sequence"
+        );
     }
 
     #[test]
@@ -449,7 +559,7 @@ mod tests {
         // For k=32, both iterators should produce the same value (modulo u64 -> u128 cast)
         let seq = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"; // 52 bases
         let k = 32u8;
-        let v64: Vec<u64>  = KmerIter::new(seq, k, false).collect();
+        let v64: Vec<u64> = KmerIter::new(seq, k, false).collect();
         let v128: Vec<u128> = KmerIter128::new(seq, k, false).collect();
         let as128: Vec<u128> = v64.iter().map(|&x| x as u128).collect();
         assert_eq!(v128, as128, "KmerIter128 at k=32 must match KmerIter");
@@ -460,7 +570,8 @@ mod tests {
     #[test]
     fn test_kmeru256_k65_basic() {
         // Generate one k=65 kmer from 65 bases, check it fits in 130 bits (2*65)
-        let seq: Vec<u8> = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTAG".to_vec();
+        let seq: Vec<u8> =
+            b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTAG".to_vec();
         assert_eq!(seq.len(), 66);
         let kmers: Vec<KmerU256> = KmerIterU256::new(&seq, 65, false).collect();
         assert_eq!(kmers.len(), 2);
@@ -474,11 +585,22 @@ mod tests {
         let seq = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTA";
         assert_eq!(seq.len(), 65);
         let fwd: Vec<KmerU256> = KmerIterU256::new(seq, 65, true).collect();
-        let rc: Vec<u8> = seq.iter().rev()
-            .map(|&b| match b { b'A' => b'T', b'T' => b'A', b'C' => b'G', b'G' => b'C', x => x })
+        let rc: Vec<u8> = seq
+            .iter()
+            .rev()
+            .map(|&b| match b {
+                b'A' => b'T',
+                b'T' => b'A',
+                b'C' => b'G',
+                b'G' => b'C',
+                x => x,
+            })
             .collect();
         let rev: Vec<KmerU256> = KmerIterU256::new(&rc, 65, true).collect();
-        assert_eq!(fwd, rev, "canonical k=65 kmer must equal that of rev-complement sequence");
+        assert_eq!(
+            fwd, rev,
+            "canonical k=65 kmer must equal that of rev-complement sequence"
+        );
     }
 
     #[test]

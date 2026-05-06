@@ -1,8 +1,17 @@
 [package]
 name = "kite"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
-description = "K-mer Indexing and Txxx Engine"
+description = "K-mer indexing and throughput engine"
+authors = ["Jie Hua <Jie.Hua@lmu.de>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/jiehua1995/Kite"
+homepage = "https://github.com/jiehua1995/Kite"
+documentation = "https://github.com/jiehua1995/Kite"
+keywords = ["bioinformatics", "kmer", "genomics", "fastq", "fasta", "sequencing"]
+categories = ["command-line-utilities", "science"]
+rust-version = "1.78"
 
 
 [[bin]]
@@ -19,7 +28,6 @@ rayon = "1"
 libc = "0.2"
 num_cpus = "1"
 anyhow = "1"
-io-uring = "0.6"
 itoa = "1"
 zstd = { version = "0.13", default-features = false, features = ["zstdmt"] }
 

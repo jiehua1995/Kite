@@ -3,17 +3,17 @@ use std::path::Path;
 /// Detected compression type for an input FASTQ file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionType {
-    Plain,    // .fastq / .fq
-    Gzip,     // .fastq.gz / .fq.gz — standard deflate/gzip stream
-    Bgzf,     // .fastq.gz that is BGZF (block gzip): bgzipped BAM-style
+    Plain, // .fastq / .fq
+    Gzip,  // .fastq.gz / .fq.gz — standard deflate/gzip stream
+    Bgzf,  // .fastq.gz that is BGZF (block gzip): bgzipped BAM-style
 }
 
 impl std::fmt::Display for CompressionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CompressionType::Plain => write!(f, "plain"),
-            CompressionType::Gzip  => write!(f, "gzip"),
-            CompressionType::Bgzf  => write!(f, "bgzf"),
+            CompressionType::Gzip => write!(f, "gzip"),
+            CompressionType::Bgzf => write!(f, "bgzf"),
         }
     }
 }

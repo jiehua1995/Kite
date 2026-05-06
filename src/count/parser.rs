@@ -116,5 +116,4 @@ mod tests {
         assert_eq!(reads, 2);
         assert_eq!(bases, 8);
     }
-
 }

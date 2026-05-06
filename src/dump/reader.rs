@@ -1,9 +1,9 @@
-use std::io;
-use std::fs::File;
-use std::borrow::Cow;
 use memmap2::Mmap;
+use std::borrow::Cow;
+use std::fs::File;
+use std::io;
 
-use crate::format::{KiteHeader, ChunkIndexEntry, PartitionEntry, Kx2Footer};
+use crate::format::{ChunkIndexEntry, KiteHeader, Kx2Footer, PartitionEntry};
 use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
 
 /// Per-chunk location in the .kite data area.
@@ -68,7 +68,10 @@ impl KiteReader {
 
         let footer_offset = header.footer_offset as usize;
         if footer_offset + Kx2Footer::SIZE > mmap.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "footer out of bounds"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "footer out of bounds",
+            ));
         }
         let mut footer_cursor = io::Cursor::new(&mmap[footer_offset..]);
         let footer = Kx2Footer::read_from(&mut footer_cursor)?;
@@ -78,7 +81,10 @@ impl KiteReader {
         let partition_entry_size = PartitionEntry::SIZE;
         let partition_table_end = partition_table_offset + partitions * partition_entry_size;
         if partition_table_end > mmap.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "partition table out of bounds"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "partition table out of bounds",
+            ));
         }
         let mut p_cursor = io::Cursor::new(&mmap[partition_table_offset..]);
         let mut partition_entries = Vec::with_capacity(partitions);
@@ -89,11 +95,17 @@ impl KiteReader {
         let chunk_index_offset = header.chunk_index_offset as usize;
         let chunk_index_end = header.partition_table_offset as usize;
         if chunk_index_end < chunk_index_offset {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid chunk index offsets"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid chunk index offsets",
+            ));
         }
         let chunk_bytes = chunk_index_end - chunk_index_offset;
         if chunk_bytes % ChunkIndexEntry::SIZE != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "chunk index size misaligned"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "chunk index size misaligned",
+            ));
         }
         let chunk_count = chunk_bytes / ChunkIndexEntry::SIZE;
         let mut c_cursor = io::Cursor::new(&mmap[chunk_index_offset..chunk_index_end]);
@@ -107,8 +119,10 @@ impl KiteReader {
             let start = p.first_chunk_idx as usize;
             let end = start + p.chunk_count as usize;
             if end > chunk_entries.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData,
-                    format!("partition {} chunk range out of bounds", b)));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("partition {} chunk range out of bounds", b),
+                ));
             }
 
             let mut chunks = Vec::with_capacity(p.chunk_count as usize);
@@ -116,13 +130,18 @@ impl KiteReader {
                 let file_offset = e.file_offset as usize;
                 let encoded_bytes = e.encoded_bytes as usize;
                 if encoded_bytes == 0 || file_offset + encoded_bytes > mmap.len() {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData,
-                        format!("partition {} chunk out of bounds", b)));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("partition {} chunk out of bounds", b),
+                    ));
                 }
                 if e.codec & !(CODEC_DVLE | CODEC_RAW | CODEC_ZSTD) != 0 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("partition {} chunk uses unsupported codec mask {:#x}", b, e.codec),
+                        format!(
+                            "partition {} chunk uses unsupported codec mask {:#x}",
+                            b, e.codec
+                        ),
                     ));
                 }
                 chunks.push(ChunkLocation {
@@ -164,7 +183,10 @@ impl KiteReader {
         }
 
         let decoded = zstd::bulk::decompress(payload, loc.raw_bytes as usize).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("zstd decompress failed: {e}"))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("zstd decompress failed: {e}"),
+            )
         })?;
         if decoded.len() != loc.raw_bytes as usize {
             return Err(io::Error::new(

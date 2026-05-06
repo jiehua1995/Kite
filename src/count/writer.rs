@@ -1,10 +1,10 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 
-use crossbeam_channel::{Sender, bounded};
+use crossbeam_channel::{bounded, Sender};
 
 use crate::count::memory::SharedBudget;
 use crate::format::{ChunkIndexEntry, KiteHeader, Kx2Footer, PartitionEntry};
@@ -153,15 +153,20 @@ impl ConcurrentKiteWriter {
     fn claim_offset_and_enqueue(&self, mut data: Vec<u8>) -> io::Result<u64> {
         let data_len = data.len() as u64;
         loop {
-            while self.write_tx_probe.as_ref().is_some_and(|probe| probe.is_full()) {
+            while self
+                .write_tx_probe
+                .as_ref()
+                .is_some_and(|probe| probe.is_full())
+            {
                 std::thread::yield_now();
             }
 
             let mut state = self.file_state.lock().unwrap();
             let send_result = {
-                let tx = state.write_tx.as_ref().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::BrokenPipe, "writer finalized")
-                })?;
+                let tx = state
+                    .write_tx
+                    .as_ref()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "writer finalized"))?;
                 tx.try_send(data)
             };
 
@@ -276,7 +281,8 @@ impl ConcurrentKiteWriter {
             let mut staging = self.partition_staging[partition_id].lock().unwrap();
             self.reserve_partition_capacity(&mut staging);
 
-            if !staging.buffer.is_empty() && staging.buffer.len() + data.len() > self.staging_bytes {
+            if !staging.buffer.is_empty() && staging.buffer.len() + data.len() > self.staging_bytes
+            {
                 self.flush_partition_locked(partition_id, &mut staging)?;
             }
 
@@ -357,8 +363,10 @@ impl ConcurrentKiteWriter {
             .sum();
 
         let chunk_index_offset = data_end;
-        let partition_table_offset = chunk_index_offset + total_chunks * ChunkIndexEntry::SIZE as u64;
-        let footer_offset = partition_table_offset + self.partitions as u64 * PartitionEntry::SIZE as u64;
+        let partition_table_offset =
+            chunk_index_offset + total_chunks * ChunkIndexEntry::SIZE as u64;
+        let footer_offset =
+            partition_table_offset + self.partitions as u64 * PartitionEntry::SIZE as u64;
         let total_size = footer_offset + Kx2Footer::SIZE as u64;
 
         let mut trailer = Vec::with_capacity((total_size - data_end) as usize + 4096);
@@ -370,7 +378,11 @@ impl ConcurrentKiteWriter {
         for chunks in &all_chunks {
             let chunk_count = chunks.len() as u64;
             let total_rows_partition = chunks.iter().map(|chunk| chunk.row_count).sum::<u64>();
-            let data_offset = chunks.iter().map(|chunk| chunk.file_offset).min().unwrap_or(0);
+            let data_offset = chunks
+                .iter()
+                .map(|chunk| chunk.file_offset)
+                .min()
+                .unwrap_or(0);
             let data_bytes = chunks.iter().map(|chunk| chunk.encoded_bytes).sum::<u64>();
             hottest_partition_segments = hottest_partition_segments.max(chunk_count);
             least_partition_segments = least_partition_segments.min(chunk_count);

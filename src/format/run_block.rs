@@ -13,7 +13,10 @@ pub fn write_varint_u64(v: u64, out: &mut Vec<u8>) {
     loop {
         let byte = (v & 0x7f) as u8;
         v >>= 7;
-        if v == 0 { out.push(byte); return; }
+        if v == 0 {
+            out.push(byte);
+            return;
+        }
         out.push(byte | 0x80);
     }
 }
@@ -25,7 +28,10 @@ pub fn write_varint_u128(v: u128, out: &mut Vec<u8>) {
     loop {
         let byte = (v & 0x7f) as u8;
         v >>= 7;
-        if v == 0 { out.push(byte); return; }
+        if v == 0 {
+            out.push(byte);
+            return;
+        }
         out.push(byte | 0x80);
     }
 }
@@ -38,7 +44,9 @@ pub fn read_varint_u64(data: &[u8]) -> (u64, usize) {
     let mut shift = 0u32;
     for (i, &byte) in data.iter().enumerate().take(10) {
         result |= ((byte & 0x7f) as u64) << shift;
-        if byte & 0x80 == 0 { return (result, i + 1); }
+        if byte & 0x80 == 0 {
+            return (result, i + 1);
+        }
         shift += 7;
     }
     (result, data.len().min(10))
@@ -51,7 +59,9 @@ pub fn read_varint_u128(data: &[u8]) -> (u128, usize) {
     let mut shift = 0u32;
     for (i, &byte) in data.iter().enumerate().take(19) {
         result |= ((byte & 0x7f) as u128) << shift;
-        if byte & 0x80 == 0 { return (result, i + 1); }
+        if byte & 0x80 == 0 {
+            return (result, i + 1);
+        }
         shift += 7;
     }
     (result, data.len().min(19))

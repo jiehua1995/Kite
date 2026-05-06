@@ -1,0 +1,115 @@
+use std::io::Write;
+use std::time::Instant;
+
+use anyhow::Context;
+
+use crate::cli::InfoArgs;
+use crate::dump::reader::KiteReader;
+use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
+use crate::stats::print_simple_test_report;
+
+pub fn run_info(args: &InfoArgs) -> anyhow::Result<()> {
+    let started = Instant::now();
+    let reader =
+        KiteReader::open(&args.input).with_context(|| format!("failed to open {}", args.input))?;
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    let file_size = std::fs::metadata(&args.input)?.len();
+
+    let total_partition_bytes: u64 = reader
+        .partition_entries
+        .iter()
+        .map(|entry| entry.data_bytes)
+        .sum();
+    let total_partition_rows: u64 = reader
+        .partition_entries
+        .iter()
+        .map(|entry| entry.total_rows)
+        .sum();
+    let hottest_partition_rows = reader
+        .partition_entries
+        .iter()
+        .map(|entry| entry.total_rows)
+        .max()
+        .unwrap_or(0);
+    let coldest_partition_rows = reader
+        .partition_entries
+        .iter()
+        .map(|entry| entry.total_rows)
+        .min()
+        .unwrap_or(0);
+    let max_chunk_bytes = reader
+        .chunk_entries
+        .iter()
+        .map(|entry| entry.encoded_bytes)
+        .max()
+        .unwrap_or(0);
+    let min_chunk_bytes = reader
+        .chunk_entries
+        .iter()
+        .map(|entry| entry.encoded_bytes)
+        .min()
+        .unwrap_or(0);
+
+    let mut raw_chunks = 0u64;
+    let mut dvle_chunks = 0u64;
+    let mut zstd_chunks = 0u64;
+    for chunk in &reader.chunk_entries {
+        if chunk.codec & CODEC_RAW != 0 {
+            raw_chunks += 1;
+        }
+        if chunk.codec & CODEC_DVLE != 0 {
+            dvle_chunks += 1;
+        }
+        if chunk.codec & CODEC_ZSTD != 0 {
+            zstd_chunks += 1;
+        }
+    }
+
+    writeln!(out, "Kite Database")?;
+    writeln!(out, "  Path:               {}", args.input)?;
+    writeln!(out, "  File Size:          {} bytes", file_size)?;
+    writeln!(out)?;
+    writeln!(out, "Format")?;
+    writeln!(out, "  Version:            {}", reader.header.version)?;
+    writeln!(out, "  K:                  {}", reader.header.k)?;
+    writeln!(
+        out,
+        "  Canonical:          {}",
+        reader.header.canonical != 0
+    )?;
+    writeln!(out, "  Partitions:         {}", reader.header.partitions)?;
+    writeln!(out, "  Key Width:          {}", reader.header.key_width)?;
+    writeln!(out)?;
+    writeln!(out, "Content")?;
+    writeln!(out, "  Total Chunks:       {}", reader.total_chunks)?;
+    writeln!(out, "  Total Rows:         {}", reader.header.total_rows)?;
+    writeln!(out, "  Partition Rows:     {}", total_partition_rows)?;
+    writeln!(out, "  Partition Bytes:    {}", total_partition_bytes)?;
+    writeln!(out)?;
+    writeln!(out, "Codec Mix")?;
+    writeln!(out, "  RAW Chunks:         {}", raw_chunks)?;
+    writeln!(out, "  DVLE Chunks:        {}", dvle_chunks)?;
+    writeln!(out, "  ZSTD Chunks:        {}", zstd_chunks)?;
+    writeln!(out)?;
+    writeln!(out, "Distribution")?;
+    writeln!(out, "  Largest Chunk:      {} bytes", max_chunk_bytes)?;
+    writeln!(out, "  Smallest Chunk:     {} bytes", min_chunk_bytes)?;
+    writeln!(out, "  Hottest Partition:  {} rows", hottest_partition_rows)?;
+    writeln!(out, "  Coldest Partition:  {} rows", coldest_partition_rows)?;
+    out.flush()?;
+    if args.test_mode {
+        let wall = started.elapsed();
+        print_simple_test_report(
+            "info",
+            &[
+                ("input", args.input.clone()),
+                ("file_size_bytes", file_size.to_string()),
+                ("partitions", reader.header.partitions.to_string()),
+                ("total_chunks", reader.total_chunks.to_string()),
+                ("total_rows", reader.header.total_rows.to_string()),
+            ],
+            wall,
+        );
+    }
+    Ok(())
+}

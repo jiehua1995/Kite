@@ -29,7 +29,12 @@ impl LoserTree {
     pub fn new(mut streams: Vec<Box<dyn Iterator<Item = (u64, u32)>>>) -> Self {
         let n = streams.len();
         if n == 0 {
-            return LoserTree { heads: vec![], loser_nodes: vec![], winner: 0, n: 0 };
+            return LoserTree {
+                heads: vec![],
+                loser_nodes: vec![],
+                winner: 0,
+                n: 0,
+            };
         }
 
         // Load first element from each stream
@@ -39,9 +44,9 @@ impl LoserTree {
         // need to store them to pull more values. Store in a side vec.
         // Re-design: store streams alongside heads.
         let _ = streams; // consumed into heads loading; we don't need more items now
-        // NOTE: This struct doesn't pull more items — it is designed to be used
-        // with RunCursor which provides all items upfront via a slice iterator.
-        // For streaming, see LoserTreeStreaming below.
+                         // NOTE: This struct doesn't pull more items — it is designed to be used
+                         // with RunCursor which provides all items upfront via a slice iterator.
+                         // For streaming, see LoserTreeStreaming below.
 
         let mut lt = LoserTree {
             heads,
@@ -123,7 +128,9 @@ impl LoserTree {
     /// Returns the next minimum (key, accumulated_count), accumulating across
     /// streams with identical keys. Returns None when all streams exhausted.
     pub fn next_accumulated(&mut self, heads: &mut Vec<Option<(u64, u32)>>) -> Option<(u64, u32)> {
-        if self.n == 0 { return None; }
+        if self.n == 0 {
+            return None;
+        }
         loop {
             let w = self.winner;
             match heads[w] {
@@ -199,8 +206,11 @@ impl LoserTreeMerger {
 
         // key_of: returns u128::MAX for sentinel or exhausted streams.
         let key_of = |i: usize| -> u128 {
-            if i >= n { u128::MAX }
-            else { heads[i].map(|(k, _)| k).unwrap_or(u128::MAX) }
+            if i >= n {
+                u128::MAX
+            } else {
+                heads[i].map(|(k, _)| k).unwrap_or(u128::MAX)
+            }
         };
 
         // Build winner tree bottom-up.
@@ -213,7 +223,7 @@ impl LoserTreeMerger {
         // We need indices up to 2*n_tree-1, so size = 2*n_tree.
         let mut winner_at = vec![sentinel; 2 * n_tree]; // 1-indexed, [0] unused
         for j in 0..n {
-            winner_at[n_tree + j] = j;  // leaves at n_tree..n_tree+n-1
+            winner_at[n_tree + j] = j; // leaves at n_tree..n_tree+n-1
         }
         // Extra leaves n_tree+n..2*n_tree-1 remain = sentinel.
 
@@ -225,8 +235,8 @@ impl LoserTreeMerger {
             let l = winner_at[2 * t];
             let r = winner_at[2 * t + 1];
             if key_of(l) <= key_of(r) {
-                loser[t] = r;       // r is the loser (larger key stays at node t)
-                winner_at[t] = l;   // l is the winner (propagates up)
+                loser[t] = r; // r is the loser (larger key stays at node t)
+                winner_at[t] = l; // l is the winner (propagates up)
             } else {
                 loser[t] = l;
                 winner_at[t] = r;
@@ -235,14 +245,25 @@ impl LoserTreeMerger {
 
         let winner = winner_at[1];
 
-        LoserTreeMerger { loser, heads, streams, winner, n, n_tree, comparisons: 0 }
+        LoserTreeMerger {
+            loser,
+            heads,
+            streams,
+            winner,
+            n,
+            n_tree,
+            comparisons: 0,
+        }
     }
 
     /// Key of stream i, or u128::MAX if sentinel / exhausted.
     #[inline(always)]
     fn key_of(&self, i: usize) -> u128 {
-        if i >= self.n { u128::MAX }
-        else { self.heads[i].map(|(k, _)| k).unwrap_or(u128::MAX) }
+        if i >= self.n {
+            u128::MAX
+        } else {
+            self.heads[i].map(|(k, _)| k).unwrap_or(u128::MAX)
+        }
     }
 
     /// After updating `self.heads[leaf]`, walk the path from leaf to root.
@@ -270,10 +291,16 @@ impl LoserTreeMerger {
     /// Accumulates duplicate keys across all streams.
     /// Returns None when all streams are exhausted.
     pub fn next_min(&mut self) -> Option<(u128, u32)> {
-        if self.n == 0 { return None; }
+        if self.n == 0 {
+            return None;
+        }
         // Check if winner is sentinel (all exhausted) or its head is None.
-        if self.winner >= self.n { return None; }
-        if self.heads[self.winner].is_none() { return None; }
+        if self.winner >= self.n {
+            return None;
+        }
+        if self.heads[self.winner].is_none() {
+            return None;
+        }
 
         let min_key = self.heads[self.winner].unwrap().0;
         let mut total: u32 = 0;
@@ -281,7 +308,9 @@ impl LoserTreeMerger {
         // Consume all streams currently at min_key (including duplicates across streams).
         loop {
             let w = self.winner;
-            if w >= self.n { break; }
+            if w >= self.n {
+                break;
+            }
             match self.heads[w] {
                 None => break,
                 Some((k, _)) if k != min_key => break,

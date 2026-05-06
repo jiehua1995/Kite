@@ -105,7 +105,7 @@ pub fn radix_sort_u64_kmer(buf: &mut Vec<u64>, k: u8) {
 /// Elements below this count use the LSD path; above it MSD is faster.
 /// Empirically ≈ the point where two MSD passes produce sub-arrays that fit
 /// comfortably in L2 cache: 131 072 × k-mer-byte + scratch overhead.
-const MSD_U64_THRESHOLD:  usize = 131_072;
+const MSD_U64_THRESHOLD: usize = 131_072;
 const MSD_U128_THRESHOLD: usize = 131_072;
 /// Sub-array size below which we fall back to `sort_unstable()`.
 /// 1 024 × 8 B = 8 KB ≤ L1D (32 KB) on all target cores.
@@ -132,13 +132,19 @@ fn msd_radix_sort_u64(data: &mut [u64], byte_hi: u32, byte_lo: u32) {
     {
         if n >= 1024 && is_x86_feature_detected!("avx512f") {
             // SAFETY: feature checked above
-            unsafe { build_histogram_avx512(data, shift, &mut hist); }
+            unsafe {
+                build_histogram_avx512(data, shift, &mut hist);
+            }
         } else {
-            for &v in data.iter() { hist[((v >> shift) & 0xFF) as usize] += 1; }
+            for &v in data.iter() {
+                hist[((v >> shift) & 0xFF) as usize] += 1;
+            }
         }
     }
     #[cfg(not(target_arch = "x86_64"))]
-    for &v in data.iter() { hist[((v >> shift) & 0xFF) as usize] += 1; }
+    for &v in data.iter() {
+        hist[((v >> shift) & 0xFF) as usize] += 1;
+    }
 
     // Scatter into thread-local scratch, then copy back.
     // Scoping `tmp` here ensures it is logically "dead" before the recursive
@@ -148,7 +154,10 @@ fn msd_radix_sort_u64(data: &mut [u64], byte_hi: u32, byte_lo: u32) {
         let tmp = scratch_u64(n);
         let mut prefix = [0usize; 256];
         let mut acc = 0usize;
-        for i in 0..256 { prefix[i] = acc; acc += hist[i]; }
+        for i in 0..256 {
+            prefix[i] = acc;
+            acc += hist[i];
+        }
         for &v in data.iter() {
             let key = ((v >> shift) & 0xFF) as usize;
             tmp[prefix[key]] = v;
@@ -165,11 +174,7 @@ fn msd_radix_sort_u64(data: &mut [u64], byte_hi: u32, byte_lo: u32) {
         for i in 0..256 {
             let sub_n = hist[i];
             if sub_n > 1 {
-                msd_radix_sort_u64(
-                    &mut data[offset..offset + sub_n],
-                    byte_hi - 1,
-                    byte_lo,
-                );
+                msd_radix_sort_u64(&mut data[offset..offset + sub_n], byte_hi - 1, byte_lo);
             }
             offset += sub_n;
         }
@@ -186,13 +191,18 @@ fn msd_radix_sort_u128(data: &mut [u128], byte_hi: u32, byte_lo: u32) {
     let n = data.len();
     let shift = byte_hi * 8;
     let mut hist = [0usize; 256];
-    for &v in data.iter() { hist[((v >> shift) & 0xFF) as usize] += 1; }
+    for &v in data.iter() {
+        hist[((v >> shift) & 0xFF) as usize] += 1;
+    }
 
     {
         let tmp = scratch_u128(n);
         let mut prefix = [0usize; 256];
         let mut acc = 0usize;
-        for i in 0..256 { prefix[i] = acc; acc += hist[i]; }
+        for i in 0..256 {
+            prefix[i] = acc;
+            acc += hist[i];
+        }
         for &v in data.iter() {
             let key = ((v >> shift) & 0xFF) as usize;
             tmp[prefix[key]] = v;
@@ -206,11 +216,7 @@ fn msd_radix_sort_u128(data: &mut [u128], byte_hi: u32, byte_lo: u32) {
         for i in 0..256 {
             let sub_n = hist[i];
             if sub_n > 1 {
-                msd_radix_sort_u128(
-                    &mut data[offset..offset + sub_n],
-                    byte_hi - 1,
-                    byte_lo,
-                );
+                msd_radix_sort_u128(&mut data[offset..offset + sub_n], byte_hi - 1, byte_lo);
             }
             offset += sub_n;
         }
@@ -286,8 +292,13 @@ fn radix_sort_u64_passes(buf: &mut Vec<u64>, n_passes: usize) {
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn radix_sort_u64_avx512(buf: &mut Vec<u64>, n_passes: u32) {
     let n = buf.len();
-    if n < 2 { return; }
-    if n < 1024 { buf.sort_unstable(); return; }
+    if n < 2 {
+        return;
+    }
+    if n < 1024 {
+        buf.sort_unstable();
+        return;
+    }
 
     // Use thread-local scratch (no mmap per sort call)
     let tmp = scratch_u64(n);
@@ -342,7 +353,7 @@ unsafe fn build_histogram_avx512(src: &[u64], shift: u32, hist: &mut [usize; 256
 
     // shift_mm128: the shift amount as a 128-bit register (used by _mm512_srl_epi64)
     let shift_mm = _mm_cvtsi32_si128(shift as i32);
-    let mask_ff  = _mm512_set1_epi64(0xFF_i64);
+    let mask_ff = _mm512_set1_epi64(0xFF_i64);
 
     for i in 0..chunks {
         // Load 8 × u64
@@ -393,8 +404,13 @@ pub fn radix_sort_u128_kmer(buf: &mut Vec<u128>, k: u8) {
 
 fn radix_sort_u128_passes(buf: &mut Vec<u128>, n_passes: usize) {
     let n = buf.len();
-    if n < 2 { return; }
-    if n < 1024 { buf.sort_unstable(); return; }
+    if n < 2 {
+        return;
+    }
+    if n < 1024 {
+        buf.sort_unstable();
+        return;
+    }
     // Use thread-local scratch (no mmap per sort call)
     let tmp = scratch_u128(n);
     let mut result_in_tmp = false;
@@ -443,8 +459,13 @@ pub fn radix_sort_u256_kmer(buf: &mut Vec<crate::count::kmer::KmerU256>, k: u8) 
 fn _radix_sort_u256_passes(buf: &mut Vec<crate::count::kmer::KmerU256>, n_passes: usize) {
     use crate::count::kmer::KmerU256;
     let n = buf.len();
-    if n < 2 { return; }
-    if n < 1024 { buf.sort_unstable(); return; }
+    if n < 2 {
+        return;
+    }
+    if n < 1024 {
+        buf.sort_unstable();
+        return;
+    }
     // Use thread-local scratch (no mmap per sort call)
     let tmp = scratch_u256(n);
     let mut result_in_tmp = false;
@@ -536,8 +557,14 @@ pub fn rle_merge_sorted(a: &[(u64, u32)], b: &[(u64, u32)], out: &mut Vec<(u64, 
             j += 1;
         }
     }
-    while i < a.len() { out.push(a[i]); i += 1; }
-    while j < b.len() { out.push(b[j]); j += 1; }
+    while i < a.len() {
+        out.push(a[i]);
+        i += 1;
+    }
+    while j < b.len() {
+        out.push(b[j]);
+        j += 1;
+    }
 }
 
 #[cfg(test)]
@@ -565,11 +592,13 @@ mod tests {
     fn test_radix_sort_random() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        let mut v: Vec<u64> = (0u64..10000).map(|i| {
-            let mut h = DefaultHasher::new();
-            i.hash(&mut h);
-            h.finish()
-        }).collect();
+        let mut v: Vec<u64> = (0u64..10000)
+            .map(|i| {
+                let mut h = DefaultHasher::new();
+                i.hash(&mut h);
+                h.finish()
+            })
+            .collect();
         let mut expected = v.clone();
         expected.sort_unstable();
         radix_sort_u64_kmer(&mut v, 32);
@@ -583,11 +612,13 @@ mod tests {
         let mask: u64 = (1u64 << 42) - 1;
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        let mut v: Vec<u64> = (0u64..5000).map(|i| {
-            let mut h = DefaultHasher::new();
-            i.hash(&mut h);
-            h.finish() & mask
-        }).collect();
+        let mut v: Vec<u64> = (0u64..5000)
+            .map(|i| {
+                let mut h = DefaultHasher::new();
+                i.hash(&mut h);
+                h.finish() & mask
+            })
+            .collect();
         let mut expected = v.clone();
         expected.sort_unstable();
         radix_sort_u64_kmer(&mut v, 21);

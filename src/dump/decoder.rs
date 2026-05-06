@@ -30,8 +30,8 @@ pub fn decode_kmer_any(key: u128, k: u8, buf: &mut [u8]) {
     // Left-align significant bits: base[0] occupies bits 127..126 of `shifted`.
     // For k=64: shift==0 (no-op). For k=1: shift==126.
     let shifted = key << (128u32.saturating_sub(2 * k as u32));
-    let full = k / 4;   // number of complete 4-base groups
-    let rem  = k % 4;   // leftover bases (0..3)
+    let full = k / 4; // number of complete 4-base groups
+    let rem = k % 4; // leftover bases (0..3)
     for i in 0..full {
         // Group i occupies byte at bit position 127..120 shifted down by 8*i.
         let byte = (shifted >> (120usize.saturating_sub(8 * i))) as u8;
@@ -60,13 +60,13 @@ pub fn decode_kmer_u256(lo: u128, hi: u128, k: u8, buf: &mut [u8]) {
     // most-significant 2 bits of hi.  Left-align to a virtual 256-bit field
     // by treating the first `min(k,64)` bases from hi and remainder from lo.
     let k = k as usize;
-    let hi_bases = k.min(64);     // bases encoded in `hi` (up to 64)
-    let lo_bases = k - hi_bases;  // bases encoded in `lo` (the rest)
+    let hi_bases = k.min(64); // bases encoded in `hi` (up to 64)
+    let lo_bases = k - hi_bases; // bases encoded in `lo` (the rest)
 
     // Decode hi portion (bases 0..hi_bases) using hi left-aligned.
     let hi_shifted = hi << (128u32.saturating_sub(2 * hi_bases as u32));
     let full_hi = hi_bases / 4;
-    let rem_hi  = hi_bases % 4;
+    let rem_hi = hi_bases % 4;
     for i in 0..full_hi {
         let byte = (hi_shifted >> (120usize.saturating_sub(8 * i))) as u8;
         unsafe {
@@ -87,12 +87,13 @@ pub fn decode_kmer_u256(lo: u128, hi: u128, k: u8, buf: &mut [u8]) {
         let lo_shifted = lo << (128u32.saturating_sub(2 * lo_bases as u32));
         let off = hi_bases;
         let full_lo = lo_bases / 4;
-        let rem_lo  = lo_bases % 4;
+        let rem_lo = lo_bases % 4;
         for i in 0..full_lo {
             let byte = (lo_shifted >> (120usize.saturating_sub(8 * i))) as u8;
             unsafe {
                 let src = BASE4_TABLE.get_unchecked(byte as usize);
-                buf.get_unchecked_mut(off + 4 * i..off + 4 * i + 4).copy_from_slice(src);
+                buf.get_unchecked_mut(off + 4 * i..off + 4 * i + 4)
+                    .copy_from_slice(src);
             }
         }
         if rem_lo > 0 {
@@ -119,43 +120,34 @@ pub fn format_tsv_line(kmer: &[u8], count: u32, buf: &mut Vec<u8>, count_buf: &m
 mod tests {
     use super::*;
 
+    fn decode_u64_kmer(key: u64, k: u8) -> Vec<u8> {
+        let mut buf = vec![0u8; k as usize];
+        decode_kmer_any(key as u128, k, &mut buf);
+        buf
+    }
+
     #[test]
     fn test_decode_kmer_k3() {
         // ACG = 0b00_01_10 = 6
-        let mut buf = [0u8; 3];
-        decode_kmer(6, 3, &mut buf);
-        assert_eq!(&buf, b"ACG");
+        assert_eq!(decode_u64_kmer(6, 3), b"ACG");
     }
 
     #[test]
     fn test_decode_kmer_k1() {
-        let mut buf = [0u8; 1];
-        decode_kmer(0, 1, &mut buf); assert_eq!(&buf, b"A");
-        decode_kmer(1, 1, &mut buf); assert_eq!(&buf, b"C");
-        decode_kmer(2, 1, &mut buf); assert_eq!(&buf, b"G");
-        decode_kmer(3, 1, &mut buf); assert_eq!(&buf, b"T");
+        assert_eq!(decode_u64_kmer(0, 1), b"A");
+        assert_eq!(decode_u64_kmer(1, 1), b"C");
+        assert_eq!(decode_u64_kmer(2, 1), b"G");
+        assert_eq!(decode_u64_kmer(3, 1), b"T");
     }
 
     #[test]
     fn test_roundtrip_k21() {
-        use crate::count::kmer::{KmerIter};
+        use crate::count::kmer::KmerIter;
+
         let seq = b"ACGTACGTACGTACGTACGTA";
         let kmers: Vec<u64> = KmerIter::new(seq, 21, false).collect();
         assert_eq!(kmers.len(), 1);
-        let mut buf = vec![0u8; 21];
-        decode_kmer(kmers[0], 21, &mut buf);
-        assert_eq!(&buf, &seq[..21]);
-    }
-
-    #[test]
-    fn test_write_u32() {
-        let cases = [0u32, 1, 9, 10, 99, 100, 999, 65535, u32::MAX];
-        for &n in &cases {
-            let mut buf = Vec::new();
-            write_u32_decimal(n, &mut buf);
-            assert_eq!(std::str::from_utf8(&buf).unwrap(), n.to_string(),
-                "mismatch for n={n}");
-        }
+        assert_eq!(decode_u64_kmer(kmers[0], 21), seq);
     }
 
     #[test]

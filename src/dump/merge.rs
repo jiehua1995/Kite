@@ -25,7 +25,13 @@ impl MmapRunIter {
             let slice = reader.run_data_slice(loc);
             (slice.as_ptr(), loc.row_count as usize)
         };
-        Self { _reader: reader, base, entry_count, entry_size, current: 0 }
+        Self {
+            _reader: reader,
+            base,
+            entry_count,
+            entry_size,
+            current: 0,
+        }
     }
 }
 
@@ -70,7 +76,15 @@ impl DvleRunIter {
             let slice = reader.run_data_slice(loc);
             (slice.as_ptr(), slice.len(), loc.row_count as usize)
         };
-        Self { _reader: reader, data, len, pos: 0, remaining, prev_key: 0, wide }
+        Self {
+            _reader: reader,
+            data,
+            len,
+            pos: 0,
+            remaining,
+            prev_key: 0,
+            wide,
+        }
     }
 }
 
@@ -83,7 +97,12 @@ struct OwnedRunIter {
 
 impl OwnedRunIter {
     fn new(data: Vec<u8>, entry_count: usize, entry_size: usize) -> Self {
-        Self { data, entry_count, entry_size, current: 0 }
+        Self {
+            data,
+            entry_count,
+            entry_size,
+            current: 0,
+        }
     }
 }
 
@@ -118,7 +137,13 @@ struct OwnedDvleRunIter {
 
 impl OwnedDvleRunIter {
     fn new(data: Vec<u8>, remaining: usize, wide: bool) -> Self {
-        Self { data, pos: 0, remaining, prev_key: 0, wide }
+        Self {
+            data,
+            pos: 0,
+            remaining,
+            prev_key: 0,
+            wide,
+        }
     }
 }
 
@@ -146,17 +171,21 @@ impl Iterator for OwnedDvleRunIter {
         }
 
         if self.wide {
-            let (delta, n_delta) = crate::format::run_block::read_varint_u128(&self.data[self.pos..]);
+            let (delta, n_delta) =
+                crate::format::run_block::read_varint_u128(&self.data[self.pos..]);
             self.pos += n_delta;
-            let (count, n_count) = crate::format::run_block::read_varint_u64(&self.data[self.pos..]);
+            let (count, n_count) =
+                crate::format::run_block::read_varint_u64(&self.data[self.pos..]);
             self.pos += n_count;
             let key = self.prev_key.wrapping_add(delta);
             self.prev_key = key;
             Some((key, count as u32))
         } else {
-            let (delta, n_delta) = crate::format::run_block::read_varint_u64(&self.data[self.pos..]);
+            let (delta, n_delta) =
+                crate::format::run_block::read_varint_u64(&self.data[self.pos..]);
             self.pos += n_delta;
-            let (count, n_count) = crate::format::run_block::read_varint_u64(&self.data[self.pos..]);
+            let (count, n_count) =
+                crate::format::run_block::read_varint_u64(&self.data[self.pos..]);
             self.pos += n_count;
             let key = self.prev_key.wrapping_add(delta as u128);
             self.prev_key = key;
@@ -226,7 +255,11 @@ fn build_partition_merger(
                 entry_size == 20,
             )));
         } else if loc.is_dvle() {
-            streams.push(Box::new(DvleRunIter::new(Arc::clone(reader), loc, entry_size == 20)));
+            streams.push(Box::new(DvleRunIter::new(
+                Arc::clone(reader),
+                loc,
+                entry_size == 20,
+            )));
         } else if loc.is_zstd() {
             let payload = reader.run_data_for_decode(loc)?;
             streams.push(Box::new(OwnedRunIter::new(
@@ -235,7 +268,11 @@ fn build_partition_merger(
                 entry_size,
             )));
         } else {
-            streams.push(Box::new(MmapRunIter::new(Arc::clone(reader), loc, entry_size)));
+            streams.push(Box::new(MmapRunIter::new(
+                Arc::clone(reader),
+                loc,
+                entry_size,
+            )));
         }
     }
     Ok(LoserTreeMerger::new(streams))
@@ -342,7 +379,9 @@ where
             if let Some(t_merge) = t_merge {
                 merge_ns += t_merge.elapsed().as_nanos() as u64;
             }
-            let Some((key, count)) = next else { break; };
+            let Some((key, count)) = next else {
+                break;
+            };
 
             let t_format = collect_timing.then(Instant::now);
             if !slab.is_empty() && slab.capacity().saturating_sub(slab.len()) < line_reserve {

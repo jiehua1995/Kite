@@ -1,10 +1,12 @@
 use crossbeam_channel::{bounded, Receiver, Sender};
 
-pub const DUMP_SLAB_BYTES: usize = 64 * 1024 * 1024;   // 64 MiB per slab
+pub const DUMP_SLAB_BYTES: usize = 64 * 1024 * 1024; // 64 MiB per slab
 pub const DUMP_QUEUE_BYTES: usize = 4 * 1024 * 1024 * 1024; // 4 GiB write-ahead queue
 
 pub fn queue_slots_for(slab_bytes: usize, queue_bytes: usize, worker_threads: usize) -> usize {
-    (queue_bytes / slab_bytes.max(1)).max(worker_threads.max(1)).max(1)
+    (queue_bytes / slab_bytes.max(1))
+        .max(worker_threads.max(1))
+        .max(1)
 }
 
 pub struct SlabPool {

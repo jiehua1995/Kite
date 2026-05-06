@@ -1,13 +1,13 @@
-pub mod reader;
-pub mod loser_tree;
 pub mod decoder;
-pub mod writer;
+pub mod loser_tree;
 pub mod merge;
+pub mod reader;
+pub mod writer;
 
 use std::fs::File;
 use std::io::{BufWriter, IsTerminal, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,12 +17,7 @@ use rayon::prelude::*;
 use crate::cli::DumpArgs;
 use crate::dump::merge::stream_partition_slabs;
 use crate::dump::reader::KiteReader;
-use crate::dump::writer::{
-    queue_slots_for,
-    SlabPool,
-    DUMP_QUEUE_BYTES,
-    DUMP_SLAB_BYTES,
-};
+use crate::dump::writer::{queue_slots_for, SlabPool, DUMP_QUEUE_BYTES, DUMP_SLAB_BYTES};
 use crate::stats::DumpStats;
 
 fn spawn_dump_progress(
@@ -154,11 +149,16 @@ fn fmt_duration_compact(duration: Duration) -> String {
 }
 
 fn fmt_eta_compact(eta: Option<Duration>) -> String {
-    eta.map(fmt_duration_compact).unwrap_or_else(|| "--:--".to_string())
+    eta.map(fmt_duration_compact)
+        .unwrap_or_else(|| "--:--".to_string())
 }
 
 pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
-    let n_threads = if args.threads == 0 { num_cpus::get() } else { args.threads };
+    let n_threads = if args.threads == 0 {
+        num_cpus::get()
+    } else {
+        args.threads
+    };
     let collect_timing = args.test_mode;
 
     let wall_start = Instant::now();
@@ -171,12 +171,24 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     let n_partitions = reader.header.partitions as usize;
     let total_chunks = reader.total_chunks;
     let entry_size = reader.header.entry_size();
-    let total_rows: u64 = reader.chunk_entries.iter().map(|chunk| chunk.row_count).sum();
+    let total_rows: u64 = reader
+        .chunk_entries
+        .iter()
+        .map(|chunk| chunk.row_count)
+        .sum();
 
-    let chunk_counts: Vec<u64> = reader.partition_entries.iter().map(|p| p.chunk_count).collect();
+    let chunk_counts: Vec<u64> = reader
+        .partition_entries
+        .iter()
+        .map(|p| p.chunk_count)
+        .collect();
     let hottest = chunk_counts.iter().copied().max().unwrap_or(0);
     let coldest = chunk_counts.iter().copied().min().unwrap_or(0);
-    let mut chunk_sizes: Vec<u64> = reader.chunk_entries.iter().map(|c| c.encoded_bytes).collect();
+    let mut chunk_sizes: Vec<u64> = reader
+        .chunk_entries
+        .iter()
+        .map(|c| c.encoded_bytes)
+        .collect();
     chunk_sizes.sort_unstable();
     let p99_chunk_bytes = if chunk_sizes.is_empty() {
         0
@@ -213,25 +225,35 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
                 .map(|c| c.payload_len as u64)
                 .sum();
             stats.add_read(read_bytes);
-            stream_partition_slabs(partition_id, &reader, k, entry_size, slab_bytes, &slab_pool, collect_timing, &stats, |bytes, rows| {
-                out.write_all(&bytes)?;
-                stats.add_rows(rows);
-                stats.add_written(bytes.len() as u64);
-                Ok(())
-            })?;
+            stream_partition_slabs(
+                partition_id,
+                &reader,
+                k,
+                entry_size,
+                slab_bytes,
+                &slab_pool,
+                collect_timing,
+                &stats,
+                |bytes, rows| {
+                    out.write_all(&bytes)?;
+                    stats.add_rows(rows);
+                    stats.add_written(bytes.len() as u64);
+                    Ok(())
+                },
+            )?;
             stats.inc_partitions();
         }
         out.flush()?;
         let wall = wall_start.elapsed();
-        if args.test_mode {
-            stats.print_report(&args.input, total_chunks, n_partitions, wall);
-        } else {
-            eprintln!("[kite dump] done in {:.3}s", wall.as_secs_f64());
-        }
         if let Some((running, handle)) = progress_handle {
             running.store(false, Ordering::Relaxed);
             let _ = handle.join();
             clear_progress_lines(2);
+        }
+        if args.test_mode {
+            stats.print_report(args, n_threads, total_chunks, n_partitions, wall);
+        } else {
+            eprintln!("[kite dump] done in {:.3}s", wall.as_secs_f64());
         }
         return Ok(());
     }
@@ -261,12 +283,13 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
 
     if args.test_mode {
         eprintln!("[kite dump] opening: {}", args.input);
-        eprintln!("[kite dump] k={}, partitions={}, total_chunks={}", k, n_partitions, total_chunks);
+        eprintln!(
+            "[kite dump] k={}, partitions={}, total_chunks={}",
+            k, n_partitions, total_chunks
+        );
         eprintln!(
             "[kite dump] slab_bytes={}, workers={}, channel_depth={}, mode=async-writer",
-            slab_bytes,
-            worker_count,
-            channel_depth,
+            slab_bytes, worker_count, channel_depth,
         );
     }
 
@@ -333,11 +356,9 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
         clear_progress_lines(2);
     }
     if args.test_mode {
-        stats.print_report(&args.input, total_chunks, n_partitions, wall);
+        stats.print_report(args, n_threads, total_chunks, n_partitions, wall);
     } else {
         eprintln!("[kite dump] done in {:.3}s", wall.as_secs_f64());
     }
     Ok(())
 }
-
-

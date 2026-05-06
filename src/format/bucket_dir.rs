@@ -1,5 +1,5 @@
-use std::io::{self, Read, Write};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::io::{self, Read, Write};
 
 /// KX2 per-partition table entry. 40 bytes.
 #[derive(Debug, Clone, Default)]
@@ -113,7 +113,11 @@ impl Kx2Footer {
     pub const SIZE: usize = 24;
 
     pub fn new(total_chunks: u64, total_rows: u64) -> Self {
-        Kx2Footer { total_chunks, total_rows, magic_tail: Self::MAGIC_TAIL }
+        Kx2Footer {
+            total_chunks,
+            total_rows,
+            magic_tail: Self::MAGIC_TAIL,
+        }
     }
 
     pub fn write_to<W: Write>(&self, w: &mut W) -> io::Result<()> {
@@ -129,8 +133,15 @@ impl Kx2Footer {
         let mut magic_tail = [0u8; 8];
         r.read_exact(&mut magic_tail)?;
         if magic_tail != Self::MAGIC_TAIL {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid footer magic"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid footer magic",
+            ));
         }
-        Ok(Kx2Footer { total_chunks, total_rows, magic_tail })
+        Ok(Kx2Footer {
+            total_chunks,
+            total_rows,
+            magic_tail,
+        })
     }
 }

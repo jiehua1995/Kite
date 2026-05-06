@@ -11,7 +11,9 @@ pub struct Chunk {
 #[allow(dead_code)]
 impl Chunk {
     pub fn new(capacity: usize) -> Self {
-        Chunk { data: Vec::with_capacity(capacity) }
+        Chunk {
+            data: Vec::with_capacity(capacity),
+        }
     }
     pub fn clear(&mut self) {
         self.data.clear();
@@ -71,7 +73,8 @@ impl<R: Read> GzipChunkedReader<R> {
                 Err(e) => return Err(e),
             }
         }
-        self.bytes_decomp.fetch_add(total_read as u64, Ordering::Relaxed);
+        self.bytes_decomp
+            .fetch_add(total_read as u64, Ordering::Relaxed);
         chunk.extend_from_slice(&self.buf[..total_read]);
 
         if chunk.is_empty() {
@@ -134,7 +137,8 @@ impl<R: Read> PlainChunkedReader<R> {
                 Err(e) => return Err(e),
             }
         }
-        self.bytes_decomp.fetch_add(total_read as u64, Ordering::Relaxed);
+        self.bytes_decomp
+            .fetch_add(total_read as u64, Ordering::Relaxed);
         chunk.extend_from_slice(&self.buf[..total_read]);
 
         if chunk.is_empty() {
@@ -183,8 +187,11 @@ mod tests {
         // One complete + partial: split after quality of READ1
         let partial = b"@READ1\nACGT\n+\nIIII\n@READ2\nTTTT\n";
         let pos2 = find_fastq_split(partial);
-        assert_eq!(pos2, b"@READ1\nACGT\n+\nIIII\n".len(),
-            "split after first complete record");
+        assert_eq!(
+            pos2,
+            b"@READ1\nACGT\n+\nIIII\n".len(),
+            "split after first complete record"
+        );
         // carry starts with '@'
         assert_eq!(partial[pos2], b'@');
     }

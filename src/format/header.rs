@@ -1,5 +1,5 @@
-use std::io::{self, Read, Write};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::io::{self, Read, Write};
 
 pub const KITE_MAGIC: [u8; 4] = *b"KX2!";
 pub const KITE_VERSION: u16 = 4;
@@ -68,13 +68,17 @@ impl KiteHeader {
         let mut magic = [0u8; 4];
         r.read_exact(&mut magic)?;
         if magic != KITE_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("invalid magic: expected KITE, got {:?}", magic)));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid magic: expected KITE, got {:?}", magic),
+            ));
         }
         let version = r.read_u16::<LittleEndian>()?;
         if version != KITE_VERSION {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("unsupported version: {}", version)));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported version: {}", version),
+            ));
         }
         let k = r.read_u8()?;
         let canonical = r.read_u8()?;
@@ -110,7 +114,9 @@ impl KiteHeader {
 
     #[allow(dead_code)]
     #[inline]
-    pub fn is_wide_key(&self) -> bool { self.key_width == KEY_WIDTH_U128 }
+    pub fn is_wide_key(&self) -> bool {
+        self.key_width == KEY_WIDTH_U128
+    }
 
     #[inline]
     pub fn entry_size(&self) -> usize {

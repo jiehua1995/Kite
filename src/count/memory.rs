@@ -8,7 +8,7 @@ use std::thread;
 #[derive(Debug)]
 pub struct MemoryBudget {
     current: AtomicUsize,
-    limit: usize,       // total byte budget
+    limit: usize,           // total byte budget
     flush_threshold: usize, // flush when current > this (90% of limit)
 }
 
@@ -57,9 +57,11 @@ impl MemoryBudget {
     #[inline]
     pub fn free(&self, bytes: usize) {
         // Saturating sub to avoid underflow from racing alloc/free
-        let _ = self.current.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-            Some(cur.saturating_sub(bytes))
-        });
+        let _ = self
+            .current
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                Some(cur.saturating_sub(bytes))
+            });
     }
 
     #[allow(dead_code)]
@@ -80,7 +82,9 @@ impl MemoryBudget {
     }
 
     #[allow(dead_code)]
-    pub fn flush_threshold(&self) -> usize { self.flush_threshold }
+    pub fn flush_threshold(&self) -> usize {
+        self.flush_threshold
+    }
 
     #[inline]
     pub fn limit_bytes(&self) -> usize {

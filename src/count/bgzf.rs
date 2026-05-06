@@ -1,3 +1,6 @@
+use crossbeam_channel::Sender;
+use flate2::read::GzDecoder;
+use memmap2::Mmap;
 /// BGZF (Block GZip Format) parallel decompressor for kite.
 ///
 /// BGZF is a profile of gzip where each member block is independently
@@ -16,11 +19,7 @@
 ///   mistake a quality line starting with `@` for a new record header.
 ///   Counting 4-newline groups is unconditionally correct because each FASTQ
 ///   record has exactly 4 newlines: header\nseq\n+\nqual\n.
-
 use std::io::{self, Read};
-use memmap2::Mmap;
-use flate2::read::GzDecoder;
-use crossbeam_channel::Sender;
 
 // ─── BGZF constants ───────────────────────────────────────────────────────────
 
@@ -44,7 +43,7 @@ pub fn is_bgzf_header(data: &[u8], pos: usize) -> bool {
         && h[3] & 0x04 != 0             // FLG has FEXTRA bit
         && h[12] == BGZF_BC[0]          // SI1 = 'B'
         && h[13] == BGZF_BC[1]          // SI2 = 'C'
-        && h[14] == 0x02 && h[15] == 0x00  // SLEN = 2
+        && h[14] == 0x02 && h[15] == 0x00 // SLEN = 2
 }
 
 /// Extract the total block size (compressed, including header, data, CRC32, ISIZE).
@@ -66,7 +65,10 @@ pub fn scan_bgzf_blocks(data: &[u8]) -> io::Result<Vec<(usize, usize)>> {
         if !is_bgzf_header(data, pos) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Non-BGZF data at offset {} (expected gzip+BGZF header)", pos),
+                format!(
+                    "Non-BGZF data at offset {} (expected gzip+BGZF header)",
+                    pos
+                ),
             ));
         }
         let bsize = bgzf_block_total_size(data, pos);
@@ -191,10 +193,10 @@ pub fn decompress_bgzf_parallel(
 
     // Process in batches to bound peak memory.
     // Each batch: decompress in parallel, then assemble in-order.
-// Larger batch = fewer sequential carry-assembly phases,
-        // which is the only serial section in the BGZF pipeline.
-        // 8192 blocks × 65 KB ≈ 512 MB per batch; still well within RAM.
-        const BATCH_BLOCKS: usize = 8192;
+    // Larger batch = fewer sequential carry-assembly phases,
+    // which is the only serial section in the BGZF pipeline.
+    // 8192 blocks × 65 KB ≈ 512 MB per batch; still well within RAM.
+    const BATCH_BLOCKS: usize = 8192;
 
     let mut decompressed_total = 0u64;
     let mut carry: Vec<u8> = Vec::with_capacity(chunk_target_bytes + 131072);
@@ -203,7 +205,7 @@ pub fn decompress_bgzf_parallel(
     // Pre-allocate decompression output buffers — one per slot in a batch.
     // Reusing these avoids 365 K mmap/munmap cycles from per-block Vec allocs.
     let mut block_bufs: Vec<Vec<u8>> = (0..BATCH_BLOCKS)
-        .map(|_| Vec::with_capacity(66000))  // BGZF block ≤ 65536 bytes
+        .map(|_| Vec::with_capacity(66000)) // BGZF block ≤ 65536 bytes
         .collect();
 
     while batch_start < total_blocks {
@@ -227,7 +229,9 @@ pub fn decompress_bgzf_parallel(
 
         // Append decompressed data to carry, then emit FASTQ-aligned chunks.
         for buf in &block_bufs[..n_batch] {
-            if buf.is_empty() { continue; }
+            if buf.is_empty() {
+                continue;
+            }
             decompressed_total += buf.len() as u64;
             carry.extend_from_slice(buf);
 
@@ -235,10 +239,14 @@ pub fn decompress_bgzf_parallel(
                 let split = find_fastq_split_near(&carry, chunk_target_bytes);
                 if split == 0 {
                     let full_split = find_fastq_split_4lines(&carry);
-                    if full_split == 0 { break; }
+                    if full_split == 0 {
+                        break;
+                    }
                     let chunk = carry[..full_split].to_vec();
                     let leftover = carry.len() - full_split;
-                    if leftover > 0 { carry.copy_within(full_split.., 0); }
+                    if leftover > 0 {
+                        carry.copy_within(full_split.., 0);
+                    }
                     carry.truncate(leftover);
                     if output_tx.send(chunk).is_err() {
                         return Ok((compressed_size, decompressed_total));
@@ -247,7 +255,9 @@ pub fn decompress_bgzf_parallel(
                 }
                 let chunk = carry[..split].to_vec();
                 let leftover = carry.len() - split;
-                if leftover > 0 { carry.copy_within(split.., 0); }
+                if leftover > 0 {
+                    carry.copy_within(split.., 0);
+                }
                 carry.truncate(leftover);
                 if output_tx.send(chunk).is_err() {
                     return Ok((compressed_size, decompressed_total));
@@ -296,7 +306,11 @@ mod tests {
         // Quality line contains '@' — should NOT confuse the splitter
         let data = b"@r1\nACGT\n+\n@III\n@r2\nACGT\n+\nIIII\n";
         let split = find_fastq_split_4lines(data);
-        assert_eq!(split, data.len(), "all data is complete records despite @ in quality");
+        assert_eq!(
+            split,
+            data.len(),
+            "all data is complete records despite @ in quality"
+        );
     }
 
     #[test]
