@@ -1,5 +1,5 @@
 
-  <img src="doc/logo.png" alt="Kite Logo" width="120" align="left">
+  <img src="doc/logo.png" alt="Kite Logo" width="60" align="left">
   
   # Kite
   
