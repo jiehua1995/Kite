@@ -33,7 +33,7 @@ const MIB: usize = 1024 * 1024;
 const TARGET_PARTITION_BYTES: usize = 500 * MIB;
 const AUTO_MIN_PARTITIONS: usize = 256;
 const AUTO_MAX_PARTITIONS: usize = 2048;
-const WORKER_SCRATCH_BYTES: usize = 128 * MIB;
+const WORKER_SCRATCH_BYTES: usize = 48 * MIB;
 const SAMPLE_CHUNK_BYTES: usize = 8 * MIB;
 const SAMPLE_MAX_BYTES: usize = 32 * MIB;
 const SAMPLE_MAX_READS: u64 = 200_000;
@@ -352,7 +352,7 @@ fn derive_heuristic_plan(
     let input_bytes = std::fs::metadata(&args.input).map(|m| m.len()).unwrap_or(0);
     let sample = sample_input(Path::new(&args.input), compression)?;
     let encoding_factor = encoding_factor_for(key_width);
-    let min_worker_budget = encoding_factor * GIB;
+    let min_worker_budget = GIB / 2;
     let mut reasons = Vec::new();
 
     reasons.push(format!(
@@ -362,20 +362,23 @@ fn derive_heuristic_plan(
         if key_width == KEY_WIDTH_U64 { "u64" } else { "u128-or-wider" }
     ));
 
-    let divisor = (args.k as usize / 10).max(1);
     let decomp_threads = match compression {
         CompressionType::Plain => {
             reasons.push("Input is plain FASTQ, so decomp_threads fixed at 1".to_string());
             1
         }
         _ => {
-            let max_decomp = total_threads.saturating_sub(2).max(1);
+            // Use k/25 divisor so that k≤74 keeps decomp:worker ratio near 1:1.
+            // Cap decomp at total_threads/2 to always leave at least half for workers.
+            let max_decomp = (total_threads / 2).max(1);
+            let divisor = (args.k as usize / 25).max(1);
             let derived = (total_threads / divisor).max(1).min(max_decomp);
             reasons.push(format!(
-                "decomp_threads={} from threads/(k/10) = {}/{}",
+                "decomp_threads={} from threads/(k/25) = {}/{} capped at {}",
                 derived,
                 total_threads,
                 divisor,
+                max_decomp,
             ));
             derived
         }

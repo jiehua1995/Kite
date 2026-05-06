@@ -59,7 +59,14 @@ impl<K: KmerWord> CountWorker<K> {
         kite_writer: Arc<ConcurrentKiteWriter>,
         worker_budget_bytes: usize,
     ) -> Self {
-        let cap_per_bucket = (worker_budget_bytes / partitions / K::byte_size()).max(4096);
+        // Start with a small initial capacity per bucket to avoid pre-faulting
+        // 50+ GB of anonymous pages upfront (which serialises on the kernel
+        // mm lock and dominates system-time for large k).  Vecs grow lazily
+        // via the standard doubling strategy; the total copy work is small
+        // compared to the savings in page-fault overhead.
+        // 4 KiB pages for u64 (512 entries × 8B) — stays in L1 on first touch.
+        const INITIAL_BUCKET_CAP: usize = 512;
+        let cap_per_bucket = INITIAL_BUCKET_CAP.max(64 / K::byte_size());
 
         CountWorker {
             collect_timing,
@@ -98,7 +105,7 @@ impl<K: KmerWord> CountWorker<K> {
         // must flush their buckets to free memory since there is no separate writer thread.
         while self.budget.is_over_limit() {
             if self.local_bytes > 0 {
-                self.flush_largest_bucket()?;
+                self.flush_all_buckets()?;
             } else if !self.kite_writer.drain_one_partition()? {
                 std::thread::yield_now();
                 break;
@@ -174,27 +181,16 @@ impl<K: KmerWord> CountWorker<K> {
         self.budget.alloc(added_bytes);
 
         if self.local_bytes >= self.local_flush_threshold || self.budget.should_flush() {
-            self.flush_largest_bucket()?;
+            // Flush ALL non-empty buckets in one go so local_bytes resets to
+            // ~0.  Flushing only the largest bucket (the previous strategy)
+            // leaves 255/256 of the data still above the threshold, causing
+            // workers to re-enter this branch after every single chunk — a
+            // pathological O(P) write-overhead loop when the total data per
+            // worker is close to the limit (as it is for k ≥ 51 with u128).
+            self.flush_all_buckets()?;
             if self.kite_writer.needs_runtime_drain() {
                 let _ = self.kite_writer.drain_excess_staging()?;
             }
-        }
-        Ok(())
-    }
-
-    fn flush_largest_bucket(&mut self) -> io::Result<()> {
-        let mut best_bucket = None;
-        let mut best_len = 0usize;
-        for bucket in 0..self.partitions {
-            let staged = self.wc_lens[bucket] as usize;
-            let len = self.local_buckets[bucket].len() + staged;
-            if len > best_len {
-                best_len = len;
-                best_bucket = Some(bucket);
-            }
-        }
-        if let Some(bucket) = best_bucket {
-            self.flush_bucket(bucket)?;
         }
         Ok(())
     }

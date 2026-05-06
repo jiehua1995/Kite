@@ -63,6 +63,7 @@ impl CountStats {
     pub fn add_finalize_ns(&self, n: u64) { self.finalize_ns.fetch_add(n, Ordering::Relaxed); }
     #[allow(dead_code)]
     pub fn add_writer_queue_wait_ns(&self, n: u64) { self.writer_queue_wait_ns.fetch_add(n, Ordering::Relaxed); }
+    #[allow(dead_code)]
     pub fn add_writer_io_ns(&self, n: u64) { self.writer_io_ns.fetch_add(n, Ordering::Relaxed); }
     pub fn add_decomp_ns(&self, n: u64) { self.decomp_ns.fetch_add(n, Ordering::Relaxed); }
     pub fn add_kmer_ns(&self, n: u64)   { self.kmer_ns.fetch_add(n, Ordering::Relaxed); }
@@ -265,6 +266,7 @@ impl DumpStats {
     pub fn add_format_ns(&self, n: u64){ self.format_ns.fetch_add(n, Ordering::Relaxed); }
     #[allow(dead_code)]
     pub fn add_writer_queue_wait_ns(&self, n: u64) { self.writer_queue_wait_ns.fetch_add(n, Ordering::Relaxed); }
+    #[allow(dead_code)]
     pub fn add_writer_io_ns(&self, n: u64) { self.writer_io_ns.fetch_add(n, Ordering::Relaxed); }
     #[allow(dead_code)]
     pub fn add_concat_ns(&self, n: u64) { self.concat_ns.fetch_add(n, Ordering::Relaxed); }
@@ -281,21 +283,6 @@ impl DumpStats {
         self.hottest_partition_chunks.store(hottest, Ordering::Relaxed);
         self.coldest_partition_chunks.store(coldest, Ordering::Relaxed);
         self.p99_chunk_bytes.store(p99_chunk_bytes, Ordering::Relaxed);
-    }
-
-    pub fn set_shard_distribution(
-        &self,
-        shard_count: u64,
-        hottest_partitions: u64,
-        coldest_partitions: u64,
-        hottest_bytes: u64,
-        coldest_bytes: u64,
-    ) {
-        self.shard_count.store(shard_count, Ordering::Relaxed);
-        self.hottest_shard_partitions.store(hottest_partitions, Ordering::Relaxed);
-        self.coldest_shard_partitions.store(coldest_partitions, Ordering::Relaxed);
-        self.hottest_shard_bytes.store(hottest_bytes, Ordering::Relaxed);
-        self.coldest_shard_bytes.store(coldest_bytes, Ordering::Relaxed);
     }
 
     pub fn print_report(&self, input: &str, total_runs: u64, n_buckets: usize, wall: Duration) {
