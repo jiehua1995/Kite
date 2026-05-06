@@ -59,7 +59,7 @@ pub struct ConcurrentKiteWriter {
 }
 
 impl ConcurrentKiteWriter {
-    pub const MIN_STAGING_BYTES: usize = 16 * 1024 * 1024;
+    pub const MIN_STAGING_BYTES: usize = 4 * 1024 * 1024;
     pub const MAX_STAGING_BYTES: usize = 32 * 1024 * 1024;
 
     pub fn clamp_staging_bytes(io_buf_mb: usize) -> usize {

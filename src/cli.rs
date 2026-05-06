@@ -40,8 +40,8 @@ pub struct CountArgs {
     #[arg(long = "threads", default_value_t = 0)]
     pub threads: usize,
 
-    /// Number of partitions/buckets (must be power of 2)
-    #[arg(long = "partitions", default_value_t = 256)]
+    /// Number of partitions/buckets (0 = auto; otherwise must be power of 2)
+    #[arg(long = "partitions", default_value_t = 0)]
     pub partitions: usize,
 
     /// K-mers per chunk (controls batch size, flush frequency, and run granularity)
@@ -68,7 +68,7 @@ pub struct CountArgs {
     #[arg(long = "mode", value_enum, default_value_t = CountMode::Fast)]
     pub mode: CountMode,
 
-    /// Per-partition staging buffer in MB for .kite pwrite batching (clamped to 16-32 MB)
+    /// Per-partition staging buffer in MB for .kite pwrite batching (clamped to 4-32 MB)
     #[arg(long = "io-buf-mb", default_value_t = 16)]
     pub io_buf_mb: usize,
 }
@@ -87,6 +87,10 @@ pub struct DumpArgs {
     #[arg(long = "threads", default_value_t = 0)]
     pub threads: usize,
 
+    /// Number of dump writer threads (0 = auto => max(1, threads / 6)).
+    #[arg(long = "writer-threads", default_value_t = 0)]
+    pub writer_threads: usize,
+
     /// Show progress during dumping
     #[arg(long = "progress")]
     pub progress: bool,
@@ -94,8 +98,4 @@ pub struct DumpArgs {
     /// Enable detailed test-mode diagnostics output
     #[arg(long = "test-mode")]
     pub test_mode: bool,
-
-    /// Slab size in MB for dump workers (clamped to 32 MB minimum for async pwrite)
-    #[arg(long = "io-buf-mb", default_value_t = 32)]
-    pub io_buf_mb: usize,
 }

@@ -15,7 +15,15 @@ use rayon::prelude::*;
 use crate::cli::DumpArgs;
 use crate::dump::merge::{measure_partition_output, stream_partition_slabs, PartitionOutputMeasure};
 use crate::dump::reader::KiteReader;
-use crate::dump::writer::{AsyncPwriteWriter, DUMP_SLAB_BYTES};
+use crate::dump::writer::{
+    default_writer_threads,
+    queue_slots_for,
+    AsyncPwriteWriter,
+    DumpWriterConfig,
+    SlabPool,
+    DUMP_QUEUE_BYTES,
+    DUMP_SLAB_BYTES,
+};
 use crate::stats::DumpStats;
 
 struct WorkerPlan {
@@ -26,13 +34,13 @@ struct WorkerPlan {
 
 pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     let n_threads = if args.threads == 0 { num_cpus::get() } else { args.threads };
-    let slab_bytes = (args.io_buf_mb.max(32) * 1024 * 1024).max(DUMP_SLAB_BYTES);
     let collect_timing = args.test_mode;
 
     let wall_start = Instant::now();
     let stats = Arc::new(DumpStats::new(collect_timing));
     let collect_timing = stats.timing_enabled();
     let reader = Arc::new(KiteReader::open(&args.input)?);
+    let slab_bytes = DUMP_SLAB_BYTES;
 
     let k = reader.header.k;
     let n_partitions = reader.header.partitions as usize;
@@ -53,6 +61,15 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     stats.set_partition_distribution(hottest, coldest, p99_chunk_bytes);
 
     let worker_count = n_threads.clamp(1, n_partitions.max(1));
+    let writer_threads = if args.writer_threads == 0 {
+        default_writer_threads(n_threads)
+    } else {
+        args.writer_threads.max(1)
+    };
+    let slab_pool = Arc::new(SlabPool::new(
+        slab_bytes,
+        queue_slots_for(slab_bytes, DUMP_QUEUE_BYTES, writer_threads).saturating_add(writer_threads),
+    ));
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(worker_count.max(1))
         .build()?;
@@ -104,7 +121,7 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
                 .map(|c| c.payload_len as u64)
                 .sum();
             stats.add_read(read_bytes);
-            stream_partition_slabs(partition_id, &reader, k, entry_size, slab_bytes, collect_timing, &stats, |bytes, rows| {
+            stream_partition_slabs(partition_id, &reader, k, entry_size, slab_bytes, &slab_pool, collect_timing, &stats, |bytes, rows| {
                 out.write_all(&bytes)?;
                 stats.add_rows(rows);
                 stats.add_written(bytes.len() as u64);
@@ -126,8 +143,14 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     let async_writer = Arc::new(AsyncPwriteWriter::create(
         &output_path,
         total_tsv_bytes,
+        slab_bytes,
+        DumpWriterConfig {
+            writer_threads,
+            queue_bytes: DUMP_QUEUE_BYTES,
+        },
         collect_timing,
         Arc::clone(&stats),
+        Arc::clone(&slab_pool),
     )?);
 
     if args.test_mode {
@@ -166,7 +189,7 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
                     let partition_end = partition_base + partition_measures[partition_id].bytes;
                     let mut next_offset = partition_base;
 
-                    stream_partition_slabs(partition_id, &reader_work, k, entry_size, slab_bytes, collect_timing, &stats_work, |bytes, rows| {
+                    stream_partition_slabs(partition_id, &reader_work, k, entry_size, slab_bytes, &slab_pool, collect_timing, &stats_work, |bytes, rows| {
                         let offset = next_offset;
                         let bytes_len = bytes.len() as u64;
                         next_offset = next_offset.saturating_add(bytes_len);

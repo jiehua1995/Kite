@@ -59,10 +59,8 @@ impl<K: KmerWord> CountWorker<K> {
         kite_writer: Arc<ConcurrentKiteWriter>,
         worker_budget_bytes: usize,
     ) -> Self {
-        // Pre-allocate each bucket Vec to the expected steady-state size.
-        // Avoids repeated Vec::grow → mmap/munmap during the first fill phase.
-        // Expected size per bucket: budget / partitions / kmer_byte_size
         let cap_per_bucket = (worker_budget_bytes / partitions / K::byte_size()).max(4096);
+
         CountWorker {
             collect_timing,
             k,
@@ -83,7 +81,6 @@ impl<K: KmerWord> CountWorker<K> {
             wc_staging: {
                 let n = partitions * WCOM_BATCH;
                 let mut v: Vec<K> = Vec::with_capacity(n);
-                // SAFETY: K is always a LE integer word (u64/u128); zero bits are valid.
                 unsafe {
                     std::ptr::write_bytes(v.as_mut_ptr() as *mut u8, 0, n * std::mem::size_of::<K>());
                     v.set_len(n);
@@ -230,7 +227,6 @@ impl<K: KmerWord> CountWorker<K> {
         let wlen = self.wc_lens[b] as usize;
         if wlen > 0 {
             let start = b * WCOM_BATCH;
-            // SAFETY: wc_staging and local_buckets are separate heap allocations.
             let staged_ptr = self.wc_staging.as_ptr();
             unsafe {
                 self.local_buckets[b].extend_from_slice(
@@ -280,8 +276,6 @@ impl<K: KmerWord> CountWorker<K> {
             .max(4096);
 
         self.entries_buf.clear();
-        // Only shrink if we're holding >4× the expected capacity — avoids
-        // per-flush mmap/munmap on every normal-sized bucket flush.
         if self.entries_buf.capacity() > expected_cap * 4 {
             self.entries_buf.shrink_to(expected_cap * 2);
         }
@@ -291,10 +285,6 @@ impl<K: KmerWord> CountWorker<K> {
             buf.shrink_to(expected_cap * 2);
         }
 
-        // ── Free budget NOW: kmer bytes are gone from local_buckets[b] ────────
-        // Freeing here (before the write) rather than after lets the budget
-        // counter reflect reality: the Vec memory is already freed by clear().
-        // Other workers that are spinning on is_over_limit() can proceed sooner.
         self.budget.free(freed_from_local);
 
         {

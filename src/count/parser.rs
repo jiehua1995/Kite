@@ -4,10 +4,10 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
-    Header, // '@' line
-    Seq,    // sequence line
-    Plus,   // '+' line
-    Qual,   // quality line
+    Header,
+    Seq,
+    Plus,
+    Qual,
 }
 
 /// Parse all sequence lines from a FASTQ byte buffer.
@@ -58,9 +58,6 @@ where
         }
         i += 1;
     }
-    // Handle incomplete last record (no trailing newline) — emit partial seq if needed
-    // In our aligned-chunk design, the last record should always end with a newline,
-    // but be safe: if we're mid-Seq, emit it.
     if state == State::Seq && seq_start < len {
         on_seq(&data[seq_start..len]);
     }
@@ -119,4 +116,5 @@ mod tests {
         assert_eq!(reads, 2);
         assert_eq!(bases, 8);
     }
+
 }

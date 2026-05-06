@@ -86,7 +86,7 @@ impl CountStats {
         self.least_partition_segments.store(least, Ordering::Relaxed);
     }
 
-    pub fn print_report(&self, args: &crate::cli::CountArgs, wall: Duration) {
+    pub fn print_report(&self, args: &crate::cli::CountArgs, actual_partitions: usize, wall: Duration) {
         let reads = self.reads_processed.load(Ordering::Relaxed);
         let bases = self.bases_processed.load(Ordering::Relaxed);
         let kmers = self.kmers_generated.load(Ordering::Relaxed);
@@ -115,7 +115,7 @@ impl CountStats {
         eprintln!("  k:                    {}", args.k);
         eprintln!("  canonical:            {}", args.canonical);
         eprintln!("  threads:              {}", args.threads);
-        eprintln!("  partitions:           {}", args.partitions);
+        eprintln!("  partitions:           {}", actual_partitions);
         eprintln!("  chunk-kmers:          {}", args.chunk_kmers);
         eprintln!("  max-memory-gb:        {}", args.max_memory_gb);
         eprintln!("  ---");
@@ -312,6 +312,11 @@ impl DumpStats {
         let longest_worker_ms = self.longest_worker_ns.load(Ordering::Relaxed) / 1_000_000;
         let shortest_worker_ms = self.shortest_worker_ns.load(Ordering::Relaxed) / 1_000_000;
         let cpu_util_pct = get_process_cpu_util_pct(wall);
+        let throughput_mb_s = if wall.as_secs_f64() > 0.0 {
+            bwrite as f64 / 1024.0 / 1024.0 / wall.as_secs_f64()
+        } else {
+            0.0
+        };
 
         eprintln!("=== kite dump test-mode report ===");
         eprintln!("  input .kite:          {}", input);
@@ -332,6 +337,7 @@ impl DumpStats {
         eprintln!("  longest_worker_ms:    {}", longest_worker_ms);
         eprintln!("  shortest_worker_ms:   {}", shortest_worker_ms);
         eprintln!("  total wall time:      {:.3}s", wall.as_secs_f64());
+        eprintln!("  dump_throughput_mb_s: {:.1}", throughput_mb_s);
         eprintln!("  cpu_util_pct:         {:.1}", cpu_util_pct);
         eprintln!("  peak_rss_mb:          {}", peak_rss_mb);
         eprintln!("  hottest_partition_chunks: {}", self.hottest_partition_chunks.load(Ordering::Relaxed));

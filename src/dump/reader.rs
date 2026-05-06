@@ -68,7 +68,8 @@ impl KiteReader {
         let total_chunks = footer.total_chunks;
 
         let partition_table_offset = header.partition_table_offset as usize;
-        let partition_table_end = partition_table_offset + partitions * PartitionEntry::SIZE;
+        let partition_entry_size = PartitionEntry::SIZE;
+        let partition_table_end = partition_table_offset + partitions * partition_entry_size;
         if partition_table_end > mmap.len() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "partition table out of bounds"));
         }

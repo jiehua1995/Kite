@@ -1,9 +1,12 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use itoa::Buffer;
+
 use crate::dump::decoder::{decode_kmer_any, decode_kmer_u256, format_tsv_line};
 use crate::dump::loser_tree::LoserTreeMerger;
 use crate::dump::reader::{ChunkLocation, KiteReader};
+use crate::dump::writer::SlabPool;
 use crate::stats::DumpStats;
 
 pub struct PartitionOutputMeasure {
@@ -207,6 +210,7 @@ pub fn stream_partition_slabs<F>(
     k: u8,
     entry_size: usize,
     slab_bytes: usize,
+    slab_pool: &SlabPool,
     collect_timing: bool,
     stats: &Arc<DumpStats>,
     mut emit: F,
@@ -224,6 +228,8 @@ where
 
     let worker_start = collect_timing.then(Instant::now);
     let mut kmer_buf = vec![0u8; k as usize];
+    let line_reserve = k as usize + 12;
+    let mut count_buf = Buffer::new();
 
     if entry_size == 36 {
         let t_decode = collect_timing.then(Instant::now);
@@ -250,7 +256,7 @@ where
         }
 
         let t_format = collect_timing.then(Instant::now);
-        let mut slab = Vec::with_capacity(slab_bytes);
+        let mut slab = slab_pool.acquire();
         let mut slab_rows = 0u64;
         let mut i = 0usize;
         while i < all.len() {
@@ -260,11 +266,17 @@ where
                 acc = acc.saturating_add(all[j].2);
                 j += 1;
             }
+            if !slab.is_empty() && slab.capacity().saturating_sub(slab.len()) < line_reserve {
+                let next_slab = slab_pool.acquire();
+                emit(std::mem::replace(&mut slab, next_slab), slab_rows)?;
+                slab_rows = 0;
+            }
             decode_kmer_u256(lo, hi, k, &mut kmer_buf);
-            format_tsv_line(&kmer_buf, acc, &mut slab);
+            format_tsv_line(&kmer_buf, acc, &mut slab, &mut count_buf);
             slab_rows += 1;
             if slab.len() >= slab_bytes {
-                emit(std::mem::replace(&mut slab, Vec::with_capacity(slab_bytes)), slab_rows)?;
+                let next_slab = slab_pool.acquire();
+                emit(std::mem::replace(&mut slab, next_slab), slab_rows)?;
                 slab_rows = 0;
             }
             i = j;
@@ -284,7 +296,7 @@ where
 
         let mut merge_ns = 0u64;
         let mut format_ns = 0u64;
-        let mut slab = Vec::with_capacity(slab_bytes);
+        let mut slab = slab_pool.acquire();
         let mut slab_rows = 0u64;
         loop {
             let t_merge = collect_timing.then(Instant::now);
@@ -295,15 +307,21 @@ where
             let Some((key, count)) = next else { break; };
 
             let t_format = collect_timing.then(Instant::now);
+            if !slab.is_empty() && slab.capacity().saturating_sub(slab.len()) < line_reserve {
+                let next_slab = slab_pool.acquire();
+                emit(std::mem::replace(&mut slab, next_slab), slab_rows)?;
+                slab_rows = 0;
+            }
             decode_kmer_any(key, k, &mut kmer_buf);
-            format_tsv_line(&kmer_buf, count, &mut slab);
+            format_tsv_line(&kmer_buf, count, &mut slab, &mut count_buf);
             slab_rows += 1;
             if let Some(t_format) = t_format {
                 format_ns += t_format.elapsed().as_nanos() as u64;
             }
 
             if slab.len() >= slab_bytes {
-                emit(std::mem::replace(&mut slab, Vec::with_capacity(slab_bytes)), slab_rows)?;
+                let next_slab = slab_pool.acquire();
+                emit(std::mem::replace(&mut slab, next_slab), slab_rows)?;
                 slab_rows = 0;
             }
         }

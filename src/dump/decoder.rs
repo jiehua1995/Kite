@@ -106,13 +106,12 @@ pub fn decode_kmer_u256(lo: u128, hi: u128, k: u8, buf: &mut [u8]) {
 }
 
 /// Format a single TSV line into buf: "<kmer>\t<count>\n"
-/// Uses itoa for fast integer formatting (avoids manual digit reversal).
+/// Uses a reused itoa buffer to avoid per-line formatter construction.
 #[inline]
-pub fn format_tsv_line(kmer: &[u8], count: u32, buf: &mut Vec<u8>) {
+pub fn format_tsv_line(kmer: &[u8], count: u32, buf: &mut Vec<u8>, count_buf: &mut itoa::Buffer) {
     buf.extend_from_slice(kmer);
     buf.push(b'\t');
-    let mut cnt_buf = itoa::Buffer::new();
-    buf.extend_from_slice(cnt_buf.format(count).as_bytes());
+    buf.extend_from_slice(count_buf.format(count).as_bytes());
     buf.push(b'\n');
 }
 
@@ -162,7 +161,8 @@ mod tests {
     #[test]
     fn test_format_tsv_line() {
         let mut buf = Vec::new();
-        format_tsv_line(b"ACGT", 42, &mut buf);
+        let mut count_buf = itoa::Buffer::new();
+        format_tsv_line(b"ACGT", 42, &mut buf, &mut count_buf);
         assert_eq!(&buf, b"ACGT\t42\n");
     }
 }
