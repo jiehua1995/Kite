@@ -2,7 +2,7 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Read, Write};
 
 pub const KITE_MAGIC: [u8; 4] = *b"KX2!";
-pub const KITE_VERSION: u16 = 4;
+pub const KITE_VERSION: u16 = 1;
 
 pub const KEY_WIDTH_U64: u16 = 64;
 pub const KEY_WIDTH_U128: u16 = 128;
@@ -111,12 +111,6 @@ impl KiteHeader {
     }
 
     pub const SIZE: usize = 128;
-
-    #[allow(dead_code)]
-    #[inline]
-    pub fn is_wide_key(&self) -> bool {
-        self.key_width == KEY_WIDTH_U128
-    }
 
     #[inline]
     pub fn entry_size(&self) -> usize {

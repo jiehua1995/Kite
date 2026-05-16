@@ -8,7 +8,7 @@ use crate::count::writer::ConcurrentKiteWriter;
 use crate::format::{CODEC_DVLE, CODEC_RAW};
 use crate::kiteops::{
     ensure_compatible, load_partition_counts, merge_vectors_total, open_readers,
-    print_partition_progress, serialize_partition_chunk,
+    serialize_partition_chunk, PartitionProgress,
 };
 use crate::stats::print_simple_test_report;
 
@@ -17,11 +17,16 @@ const DEFAULT_STAGING_MB: usize = 16;
 
 pub fn run_merge(args: &MergeArgs) -> anyhow::Result<()> {
     let started = Instant::now();
+    eprintln!(
+        "[kite merge] inputs={}, output={}",
+        args.inputs.len(),
+        args.output
+    );
     let readers = open_readers(&args.inputs)?;
     eprintln!("[kite merge] compatibility check:");
     for (index, (path, reader)) in args.inputs.iter().zip(readers.iter()).enumerate() {
         eprintln!(
-            "  input #{:>2}: {} | k={} canonical={} partitions={} key_width={}",
+            "[kite merge]   input #{:>2}: {} | k={} canonical={} partitions={} key_width={}",
             index + 1,
             path,
             reader.header.k,
@@ -56,14 +61,8 @@ pub fn run_merge(args: &MergeArgs) -> anyhow::Result<()> {
         ConcurrentKiteWriter::suggest_write_lanes(num_cpus::get()),
     )?;
 
+    let progress = PartitionProgress::new("merge", args.progress, meta.partitions, started);
     for partition_id in 0..meta.partitions {
-        print_partition_progress(
-            "merge",
-            args.progress,
-            partition_id + 1,
-            meta.partitions,
-            started,
-        );
         let mut vectors = Vec::with_capacity(readers.len());
         for reader in &readers {
             vectors.push(load_partition_counts(reader, partition_id)?);
@@ -82,7 +81,9 @@ pub fn run_merge(args: &MergeArgs) -> anyhow::Result<()> {
                 &chunk.data,
             )?;
         }
+        progress.update(partition_id + 1);
     }
+    progress.finish();
     let summary = writer.finalize()?;
     eprintln!(
         "[kite merge] wrote {} rows across {} chunks in {:.3}s",

@@ -66,12 +66,9 @@ impl<K: KmerWord> CountWorker<K> {
         local_flush_threshold: usize,
         zstd_level: i32,
     ) -> Self {
-        // Start with a small initial capacity per bucket to avoid pre-faulting
-        // 50+ GB of anonymous pages upfront (which serialises on the kernel
-        // mm lock and dominates system-time for large k).  Vecs grow lazily
-        // via the standard doubling strategy; the total copy work is small
-        // compared to the savings in page-fault overhead.
-        // 4 KiB pages for u64 (512 entries × 8B) — stays in L1 on first touch.
+        // Start with a small initial capacity per bucket.  Larger eager
+        // reservations looked attractive on paper, but on the HG002 k=51 path
+        // they increase kernel allocator work and system time substantially.
         const INITIAL_BUCKET_CAP: usize = 512;
         let cap_per_bucket = INITIAL_BUCKET_CAP.max(64 / K::byte_size());
         let bucket_bytes = partitions
@@ -137,19 +134,14 @@ impl<K: KmerWord> CountWorker<K> {
 
         let old_cap = buf.capacity();
         let reserve_additional = needed.saturating_sub(old_cap);
-        self.budget
-            .acquire(reserve_additional.saturating_mul(K::byte_size()));
-        buf.reserve_exact(reserve_additional);
+        buf.reserve(reserve_additional);
 
         let new_cap = buf.capacity();
         let old_reserved = self.bucket_reserved_bytes[bucket];
         let new_reserved = new_cap.saturating_mul(K::byte_size());
         if new_reserved > old_reserved {
             let extra = new_reserved - old_reserved;
-            if extra > reserve_additional.saturating_mul(K::byte_size()) {
-                self.budget
-                    .acquire(extra - reserve_additional.saturating_mul(K::byte_size()));
-            }
+            self.budget.acquire(extra);
             self.bucket_reserved_bytes[bucket] = new_reserved;
         }
     }

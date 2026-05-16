@@ -88,18 +88,6 @@ pub fn scan_bgzf_blocks(data: &[u8]) -> io::Result<Vec<(usize, usize)>> {
     Ok(blocks)
 }
 
-// ─── Block decompression ──────────────────────────────────────────────────────
-
-/// Decompress a single BGZF block using flate2 GzDecoder.
-#[allow(dead_code)]
-#[inline]
-fn decompress_block(raw: &[u8]) -> io::Result<Vec<u8>> {
-    let mut decoder = GzDecoder::new(raw);
-    let mut out = Vec::with_capacity(65536);
-    decoder.read_to_end(&mut out)?;
-    Ok(out)
-}
-
 // ─── FASTQ boundary alignment ─────────────────────────────────────────────────
 
 /// Find the last FASTQ-record boundary in `data` by counting newlines modulo 4.

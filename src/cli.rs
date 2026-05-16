@@ -1,5 +1,6 @@
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
+// CountMode
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum CountMode {
     Fast,
@@ -11,28 +12,21 @@ impl CountMode {
     #[inline]
     pub fn zstd_level(self) -> i32 {
         match self {
-            CountMode::Fast => 1,
+            CountMode::Fast => 0,
             CountMode::Balanced => 2,
             CountMode::Compact => 5,
         }
     }
-
-    #[inline]
-    pub fn target_staging_cap_mb(self) -> usize {
-        match self {
-            CountMode::Fast => 24,
-            CountMode::Balanced => 8,
-            CountMode::Compact => 4,
-        }
-    }
 }
 
+// Citation
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum CitationFormat {
     Text,
     Bibtex,
 }
 
+// Correlation
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum CorrelationMode {
     All,
@@ -40,6 +34,7 @@ pub enum CorrelationMode {
     Cosine,
 }
 
+// Embedding
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum EmbeddingMode {
     All,
@@ -51,206 +46,592 @@ pub enum EmbeddingMode {
 #[derive(Parser, Debug)]
 #[command(
     name = "kite",
-    about = "High-performance k-mer database toolkit",
+    about = "k-mer indexing and throughput engine",
     version,
     disable_version_flag = true
 )]
 pub struct Cli {
-    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
+    #[arg(short = 'v', long = "version", action = ArgAction::Version, help_heading = "Help")]
     _version: Option<bool>,
 
     #[command(subcommand)]
     pub command: Commands,
 }
 
+// Commands
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Count k-mers from FASTA/FASTQ input and write a .kite index.
     Count(CountArgs),
+
+    /// Dump k-mer counts from a .kite file into a table.
     Dump(DumpArgs),
+
+    /// Show metadata and summary information for a .kite file.
     Info(InfoArgs),
+
+    /// Query specific k-mer from a .kite file.
     Query(QueryArgs),
+
+    /// Generate a k-mer count histogram table.
     Histo(HistoArgs),
+
+    /// Merge multiple .kite files into one output file.
     Merge(MergeArgs),
+
+    /// Profile k-mer content across samples into a table.
     Profile(ProfileArgs),
+
+    /// Analyze multiple .kite files and write TSV tables plus a Quarto report.
     Analyze(AnalyzeArgs),
+
+    /// Print citation information for Kite.
     Citation(CitationArgs),
+
+    /// Run the whole workflow in a single command.
     Fly(FlyArgs),
 }
 
+// All subcommands and their arguments
+
 #[derive(Args, Debug)]
+#[command(
+    after_help = "Examples:\n  kite count -i reads.fq.gz -o reads.kite\n  kite count -i reads.fq.gz -o reads.kite -k 31 -t 32 --mode fast\n  kite count -i reads.fq.gz -o reads.kite --canonical true\n  kite count -i reads.fq.gz -o reads.kite --memory 32G --mode compact",
+    help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
+    disable_help_flag = true
+)]
 pub struct CountArgs {
-    #[arg(short = 'k', long = "kmer", default_value_t = 21)]
-    pub k: u8,
-    #[arg(short = 'i', long = "input")]
+    /// Input FASTA/FASTQ file.
+    #[arg(
+        short = 'i',
+        long = "input",
+        value_name = "FILE",
+        help_heading = "Required"
+    )]
     pub input: String,
-    #[arg(short = 'o', long = "output")]
+
+    /// Output .kite file.
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "FILE",
+        help_heading = "Required"
+    )]
     pub output: String,
-    #[arg(short = 't', long = "threads", default_value_t = 0)]
-    pub threads: usize,
-    #[arg(long = "partitions", default_value_t = 0)]
-    pub partitions: usize,
-    #[arg(long = "chunk-kmers", default_value_t = 8_000_000)]
-    pub chunk_kmers: usize,
-    #[arg(long = "memory", value_name = "SIZE")]
-    pub memory: Option<String>,
-    #[arg(long = "canonical", default_value_t = true)]
+
+    /// Length of k-mers to count.
+    #[arg(
+        short = 'k',
+        long = "kmer",
+        default_value_t = 21,
+        value_name = "k",
+        help_heading = "k-mer"
+    )]
+    pub k: u8,
+
+    /// Whether to canonicalize k-mers. Set to true or false. Default: false.
+    #[arg(long = "canonical", action = ArgAction::Set, default_value_t = false, value_name = "BOOL", help_heading = "k-mer")]
     pub canonical: bool,
-    #[arg(short = 'p', long = "progress")]
-    pub progress: bool,
-    #[arg(long = "test-mode")]
-    pub test_mode: bool,
-    #[arg(long = "mode", value_enum, default_value_t = CountMode::Fast)]
+
+    /// Output compression mode: fast=DVLE/raw only, balanced=DVLE/raw plus zstd level 2 when smaller, compact=DVLE/raw plus zstd level 5 when smaller. Default: fast.
+    #[arg(long = "mode", value_enum, default_value_t = CountMode::Fast, value_name = "MODE", help_heading = "Performance")]
     pub mode: CountMode,
-    #[arg(long = "buffer", default_value_t = 16, value_name = "MB")]
-    pub buffer: usize,
-}
 
-#[derive(Args, Debug)]
-pub struct DumpArgs {
-    #[arg(short = 'i', long = "input")]
-    pub input: String,
-    #[arg(short = 'o', long = "output")]
-    pub output: String,
-    #[arg(short = 't', long = "threads", default_value_t = 0)]
-    pub threads: usize,
-    #[arg(short = 'p', long = "progress")]
-    pub progress: bool,
-    #[arg(long = "test-mode")]
-    pub test_mode: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct InfoArgs {
-    #[arg(value_name = "INPUT")]
-    pub input: String,
-    #[arg(long = "test-mode")]
-    pub test_mode: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct QueryArgs {
-    #[arg(value_name = "INPUT")]
-    pub input: String,
-    #[arg(value_name = "KMER")]
-    pub kmer: String,
-    #[arg(long = "test-mode")]
-    pub test_mode: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct HistoArgs {
-    #[arg(short = 'i', long = "input", required = true, num_args = 1..)]
-    pub inputs: Vec<String>,
-    #[arg(short = 'o', long = "output")]
-    pub output: String,
-    #[arg(long = "label", num_args = 1.., action = ArgAction::Set)]
-    pub labels: Option<Vec<String>>,
-    #[arg(short = 'p', long = "progress")]
-    pub progress: bool,
-    #[arg(long = "test-mode")]
-    pub test_mode: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct MergeArgs {
-    #[arg(short = 'i', long = "input", required = true, num_args = 2..)]
-    pub inputs: Vec<String>,
-    #[arg(short = 'o', long = "output")]
-    pub output: String,
-    #[arg(short = 'p', long = "progress")]
-    pub progress: bool,
-    #[arg(long = "test-mode")]
-    pub test_mode: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct ProfileArgs {
-    #[arg(short = 'i', long = "input", required = true, num_args = 1..)]
-    pub inputs: Vec<String>,
-    #[arg(short = 'o', long = "output")]
-    pub output: String,
-    #[arg(long = "label", num_args = 1.., action = ArgAction::Set)]
-    pub labels: Option<Vec<String>>,
-    #[arg(short = 'p', long = "progress")]
-    pub progress: bool,
-    #[arg(long = "test-mode")]
-    pub test_mode: bool,
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct AnalyzeArgs {
-    #[arg(short = 'i', long = "input", required = true, num_args = 1..)]
-    pub inputs: Vec<String>,
-    #[arg(short = 'o', long = "output-dir")]
-    pub output_dir: String,
-    #[arg(long = "label", num_args = 1.., action = ArgAction::Set)]
-    pub labels: Option<Vec<String>>,
-    #[arg(long = "top-variable-kmers", default_value_t = 5000)]
-    pub top_variable_kmers: usize,
-    #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::All)]
-    pub correlation: CorrelationMode,
-    #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::All)]
-    pub embedding: EmbeddingMode,
-    #[arg(long = "heatmap-kmeans", default_value_t = 6)]
-    pub heatmap_kmeans: usize,
-    #[arg(long = "heatmap-seed", default_value_t = 1)]
-    pub heatmap_seed: u64,
+    /// Number of threads to use. Use 0 to auto-detect.
     #[arg(
-        long = "cluster-samples",
-        default_value_t = true,
-        action = ArgAction::Set,
-        value_name = "BOOL"
+        short = 't',
+        long = "threads",
+        default_value_t = 0,
+        value_name = "N",
+        help_heading = "Performance"
     )]
-    pub cluster_samples: bool,
-    #[arg(short = 'p', long = "progress")]
-    pub progress: bool,
-    #[arg(long = "test-mode")]
-    pub test_mode: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct CitationArgs {
-    #[arg(short = 'o', long = "output", default_value = "-")]
-    pub output: String,
-    #[arg(long = "format", value_enum, default_value_t = CitationFormat::Text)]
-    pub format: CitationFormat,
-    #[arg(long = "test-mode")]
-    pub test_mode: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct FlyArgs {
-    #[arg(short = 'i', long = "input", required = true, num_args = 1..)]
-    pub inputs: Vec<String>,
-    #[arg(short = 'o', long = "output-dir")]
-    pub output_dir: String,
-    #[arg(long = "label", num_args = 1.., action = ArgAction::Set)]
-    pub labels: Option<Vec<String>>,
-    #[arg(short = 'k', long = "kmer", default_value_t = 31)]
-    pub k: u8,
-    #[arg(short = 't', long = "threads", default_value_t = 0)]
     pub threads: usize,
-    #[arg(long = "memory", value_name = "SIZE")]
+
+    /// Number of partitions. Use 0 to auto-select.
+    #[arg(
+        long = "partitions",
+        default_value_t = 0,
+        value_name = "N",
+        help_heading = "Performance"
+    )]
+    pub partitions: usize,
+
+    /// Number of k-mers per chunk.
+    #[arg(
+        long = "chunk-kmers",
+        default_value_t = 8_000_000,
+        value_name = "N",
+        help_heading = "Performance"
+    )]
+    pub chunk_kmers: usize,
+
+    /// Memory limit, for example 8G, 16000M, or 500000000.
+    #[arg(long = "memory", value_name = "SIZE", help_heading = "Performance")]
     pub memory: Option<String>,
-    #[arg(long = "top-variable-kmers", default_value_t = 5000)]
+
+    /// Staging buffer target in MB. Independent of --mode. Default: 16.
+    #[arg(
+        long = "buffer",
+        default_value_t = 16,
+        value_name = "MB",
+        help_heading = "Performance"
+    )]
+    pub buffer: usize,
+
+    /// Show progress.
+    #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
+    pub progress: bool,
+
+    /// Run in test mode.
+    #[arg(long = "test-mode", default_value_t = false, help_heading = "Behavior")]
+    pub test_mode: bool,
+
+    /// Print help information for `kite count`.
+    #[arg(short = 'h', long = "help", action = ArgAction::Help, help_heading = "Help")]
+    pub _help: Option<bool>,
+}
+
+/// Dump k-mer counts from a .kite file into a table.
+#[derive(Args, Debug)]
+#[command(
+    after_help = "Examples:\n  kite dump -i reads.kite -o reads.tsv",
+    help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
+    disable_help_flag = true
+)]
+pub struct DumpArgs {
+    /// Input .kite file.
+    #[arg(
+        short = 'i',
+        long = "input",
+        value_name = "FILE",
+        help_heading = "Required"
+    )]
+    pub input: String,
+
+    /// Output table.
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "FILE",
+        help_heading = "Required"
+    )]
+    pub output: String,
+
+    /// Threads to be used for dumping. Use 0 to auto-detect.
+    #[arg(
+        short = 't',
+        long = "threads",
+        default_value_t = 0,
+        value_name = "N",
+        help_heading = "Performance"
+    )]
+    pub threads: usize,
+
+    /// Show progress.
+    #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
+    pub progress: bool,
+
+    /// Run in test mode.
+    #[arg(long = "test-mode", default_value_t = false, help_heading = "Behavior")]
+    pub test_mode: bool,
+
+    /// Print help information for `kite dump`.
+    #[arg(short = 'h', long = "help", action = ArgAction::Help, help_heading = "Help")]
+    pub _help: Option<bool>,
+}
+
+/// Show metadata and summary information for a .kite file.
+#[derive(Args, Debug)]
+#[command(
+    after_help = "Examples:\n  kite info -i sample.kite",
+    help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
+    disable_help_flag = true
+)]
+pub struct InfoArgs {
+    /// Input .kite file.
+    #[arg(
+        short = 'i',
+        long = "input",
+        value_name = "FILE",
+        help_heading = "Required"
+    )]
+    pub input: String,
+
+    /// Run in test mode.
+    #[arg(long = "test-mode", default_value_t = false, help_heading = "Behavior")]
+    pub test_mode: bool,
+
+    /// Print help information for `kite info`.
+    #[arg(short = 'h', long = "help", action = ArgAction::Help, help_heading = "Help")]
+    pub _help: Option<bool>,
+}
+
+/// Query specific k-mer from a .kite file.
+#[derive(Args, Debug)]
+#[command(
+    after_help = "Examples:\n  kite query -i sample.kite -k ACGT",
+    help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
+    disable_help_flag = true
+)]
+pub struct QueryArgs {
+    /// Input .kite file.
+    #[arg(
+        short = 'i',
+        long = "input",
+        value_name = "FILE",
+        help_heading = "Required"
+    )]
+    pub input: String,
+
+    /// K-mer to query.
+    #[arg(
+        short = 'k',
+        long = "kmer",
+        value_name = "k-mer",
+        help_heading = "Required"
+    )]
+    pub kmer: String,
+
+    /// Run in test mode.
+    #[arg(long = "test-mode", default_value_t = false, help_heading = "Behavior")]
+    pub test_mode: bool,
+
+    /// Print help information for `kite query`.
+    #[arg(short = 'h', long = "help", action = ArgAction::Help, help_heading = "Help")]
+    pub _help: Option<bool>,
+}
+
+/// Generate a k-mer count histogram table.
+#[derive(Args, Debug)]
+#[command(
+    after_help = "Examples:\n  kite histo -i a.kite b.kite -o histo.tsv",
+    help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
+    disable_help_flag = true
+)]
+pub struct HistoArgs {
+    /// Input .kite files. Pass all files after one -i/--input.
+    #[arg(short = 'i', long = "input", required = true, num_args = 1.., value_name = "FILE", help_heading = "Required")]
+    pub inputs: Vec<String>,
+
+    /// Output histogram table.
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "FILE",
+        help_heading = "Required"
+    )]
+    pub output: String,
+
+    /// Labels for the input files.
+    #[arg(long = "label", num_args = 1.., action = ArgAction::Set, value_name = "LABEL", help_heading = "Behavior")]
+    pub labels: Option<Vec<String>>,
+
+    /// Show progress.
+    #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
+    pub progress: bool,
+
+    /// Run in test mode.
+    #[arg(long = "test-mode", default_value_t = false, help_heading = "Behavior")]
+    pub test_mode: bool,
+
+    /// Print help information for `kite histo`.
+    #[arg(short = 'h', long = "help", action = ArgAction::Help, help_heading = "Help")]
+    pub _help: Option<bool>,
+}
+
+/// Merge multiple .kite files into one output file.
+#[derive(Args, Debug)]
+#[command(
+    after_help = "Examples:\n  kite merge -i a.kite b.kite -o merged.kite",
+    help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
+    disable_help_flag = true
+)]
+pub struct MergeArgs {
+    /// Input .kite files. Pass all files after one -i/--input.
+    #[arg(short = 'i', long = "input", required = true, num_args = 2.., value_name = "FILE", help_heading = "Required")]
+    pub inputs: Vec<String>,
+
+    /// Output .kite file.
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "FILE",
+        help_heading = "Required"
+    )]
+    pub output: String,
+
+    /// Show progress.
+    #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
+    pub progress: bool,
+
+    /// Run in test mode.
+    #[arg(long = "test-mode", default_value_t = false, help_heading = "Behavior")]
+    pub test_mode: bool,
+
+    /// Print help information for `kite merge`.
+    #[arg(short = 'h', long = "help", action = ArgAction::Help, help_heading = "Help")]
+    pub _help: Option<bool>,
+}
+
+/// Profile k-mer content across samples into a table.
+#[derive(Args, Debug)]
+#[command(
+    after_help = "Examples:\n  kite profile -i sample1.kite sample2.kite -o profile.tsv",
+    help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
+    disable_help_flag = true
+)]
+pub struct ProfileArgs {
+    /// Input .kite files. Pass all files after one -i/--input.
+    #[arg(short = 'i', long = "input", required = true, num_args = 1.., value_name = "FILE", help_heading = "Required")]
+    pub inputs: Vec<String>,
+
+    /// Output profile table.
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "FILE",
+        help_heading = "Required"
+    )]
+    pub output: String,
+
+    /// Labels for the input files.
+    #[arg(long = "label", num_args = 1.., action = ArgAction::Set, value_name = "LABEL", help_heading = "Behavior")]
+    pub labels: Option<Vec<String>>,
+
+    /// Show progress.
+    #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
+    pub progress: bool,
+
+    /// Run in test mode.
+    #[arg(long = "test-mode", default_value_t = false, help_heading = "Behavior")]
+    pub test_mode: bool,
+
+    /// Print help information for `kite profile`.
+    #[arg(short = 'h', long = "help", action = ArgAction::Help, help_heading = "Help")]
+    pub _help: Option<bool>,
+}
+
+/// Analyze multiple .kite files and write TSV tables plus a Quarto report.
+#[derive(Args, Debug, Clone)]
+#[command(
+    after_help = "Examples:\n  kite analyze -i sample1.kite sample2.kite -o analysis_dir",
+    help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
+    disable_help_flag = true
+)]
+pub struct AnalyzeArgs {
+    /// Input .kite files. Pass all files after one -i/--input.
+    #[arg(short = 'i', long = "input", required = true, num_args = 1.., value_name = "FILE", help_heading = "Required")]
+    pub inputs: Vec<String>,
+
+    /// Output analysis directory.
+    #[arg(
+        short = 'o',
+        long = "output-dir",
+        value_name = "DIR",
+        help_heading = "Required"
+    )]
+    pub output_dir: String,
+
+    /// Labels for the input files.
+    #[arg(long = "label", num_args = 1.., action = ArgAction::Set, value_name = "LABEL", help_heading = "Behavior")]
+    pub labels: Option<Vec<String>>,
+
+    /// Number of top variable k-mers to analyze. Use 0 for all.
+    #[arg(
+        long = "top-variable-kmers",
+        default_value_t = 0,
+        value_name = "N",
+        hide = true
+    )]
     pub top_variable_kmers: usize,
-    #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::All)]
+
+    /// Correlation mode for analysis.
+    #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::All, value_name = "MODE", help_heading = "Analysis")]
     pub correlation: CorrelationMode,
-    #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::All)]
+
+    /// Embedding mode for analysis.
+    #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::All, value_name = "MODE", help_heading = "Analysis")]
     pub embedding: EmbeddingMode,
-    #[arg(long = "heatmap-kmeans", default_value_t = 6)]
+
+    /// Number of clusters for heatmap k-means.
+    #[arg(
+        long = "heatmap-kmeans",
+        default_value_t = 6,
+        value_name = "N",
+        help_heading = "Analysis"
+    )]
     pub heatmap_kmeans: usize,
-    #[arg(long = "heatmap-seed", default_value_t = 1)]
+
+    /// Seed for heatmap k-means.
+    #[arg(
+        long = "heatmap-seed",
+        default_value_t = 1,
+        value_name = "N",
+        help_heading = "Analysis"
+    )]
     pub heatmap_seed: u64,
+
+    /// Whether to cluster samples in heatmaps.
     #[arg(
         long = "cluster-samples",
         default_value_t = true,
         action = ArgAction::Set,
-        value_name = "BOOL"
+        value_name = "BOOL",
+        help_heading = "Analysis"
     )]
     pub cluster_samples: bool,
-    #[arg(short = 'p', long = "progress")]
+
+    /// Show progress.
+    #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
     pub progress: bool,
-    #[arg(long = "test-mode")]
+
+    /// Run in test mode.
+    #[arg(long = "test-mode", default_value_t = false, help_heading = "Behavior")]
     pub test_mode: bool,
+
+    /// Print help information for `kite analyze`.
+    #[arg(short = 'h', long = "help", action = ArgAction::Help, help_heading = "Help")]
+    pub _help: Option<bool>,
+}
+
+/// Print citation information for Kite.
+#[derive(Args, Debug)]
+#[command(
+    after_help = "Examples:\n  kite citation -o citation.txt",
+    help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
+    disable_help_flag = true
+)]
+pub struct CitationArgs {
+    /// Output file. Use - for stdout.
+    #[arg(
+        short = 'o',
+        long = "output",
+        default_value = "-",
+        value_name = "FILE",
+        help_heading = "Output"
+    )]
+    pub output: String,
+
+    /// Citation format.
+    #[arg(long = "format", value_enum, default_value_t = CitationFormat::Text, value_name = "FORMAT", help_heading = "Output")]
+    pub format: CitationFormat,
+
+    /// Run in test mode.
+    #[arg(long = "test-mode", default_value_t = false, help_heading = "Behavior")]
+    pub test_mode: bool,
+
+    /// Print help information for `kite citation`.
+    #[arg(short = 'h', long = "help", action = ArgAction::Help, help_heading = "Help")]
+    pub _help: Option<bool>,
+}
+
+/// Run the whole workflow in a single command.
+#[derive(Args, Debug)]
+#[command(
+    after_help = "Examples:\n  kite fly -i reads1.fq reads2.fq -o out_dir\n  kite fly -i reads1.fq reads2.fq -o out_dir --canonical true",
+    help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
+    disable_help_flag = true
+)]
+pub struct FlyArgs {
+    /// Input FASTA/FASTQ files. Pass all files after one -i/--input.
+    #[arg(short = 'i', long = "input", required = true, num_args = 1.., value_name = "FILE", help_heading = "Required")]
+    pub inputs: Vec<String>,
+
+    /// Output workflow directory.
+    #[arg(
+        short = 'o',
+        long = "output-dir",
+        value_name = "DIR",
+        help_heading = "Required"
+    )]
+    pub output_dir: String,
+
+    /// Labels for the input files.
+    #[arg(long = "label", num_args = 1.., action = ArgAction::Set, value_name = "LABEL", help_heading = "Behavior")]
+    pub labels: Option<Vec<String>>,
+
+    /// Length of k-mers to count.
+    #[arg(
+        short = 'k',
+        long = "kmer",
+        default_value_t = 31,
+        value_name = "k",
+        help_heading = "k-mer"
+    )]
+    pub k: u8,
+
+    /// Whether to canonicalize k-mers. Set to true or false. Default: false.
+    #[arg(long = "canonical", action = ArgAction::Set, default_value_t = false, value_name = "BOOL", help_heading = "k-mer")]
+    pub canonical: bool,
+
+    /// Number of threads to use. Use 0 to auto-detect.
+    #[arg(
+        short = 't',
+        long = "threads",
+        default_value_t = 0,
+        value_name = "N",
+        help_heading = "Performance"
+    )]
+    pub threads: usize,
+
+    /// Memory limit, for example 8G, 16000M, or 500000000.
+    #[arg(long = "memory", value_name = "SIZE", help_heading = "Performance")]
+    pub memory: Option<String>,
+
+    /// Number of top variable k-mers to analyze. Use 0 for all.
+    #[arg(
+        long = "top-variable-kmers",
+        default_value_t = 0,
+        value_name = "N",
+        hide = true
+    )]
+    pub top_variable_kmers: usize,
+
+    /// Correlation mode for analysis.
+    #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::All, value_name = "MODE", help_heading = "Analysis")]
+    pub correlation: CorrelationMode,
+
+    /// Embedding mode for analysis.
+    #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::All, value_name = "MODE", help_heading = "Analysis")]
+    pub embedding: EmbeddingMode,
+
+    /// Number of clusters for heatmap k-means.
+    #[arg(
+        long = "heatmap-kmeans",
+        default_value_t = 6,
+        value_name = "N",
+        help_heading = "Analysis"
+    )]
+    pub heatmap_kmeans: usize,
+
+    /// Seed for heatmap k-means.
+    #[arg(
+        long = "heatmap-seed",
+        default_value_t = 1,
+        value_name = "N",
+        help_heading = "Analysis"
+    )]
+    pub heatmap_seed: u64,
+
+    /// Whether to cluster samples in heatmaps.
+    #[arg(
+        long = "cluster-samples",
+        default_value_t = true,
+        action = ArgAction::Set,
+        value_name = "BOOL",
+        help_heading = "Analysis"
+    )]
+    pub cluster_samples: bool,
+
+    /// Show progress.
+    #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
+    pub progress: bool,
+
+    /// Run in test mode.
+    #[arg(long = "test-mode", default_value_t = false, help_heading = "Behavior")]
+    pub test_mode: bool,
+
+    /// Print help information for `kite fly`.
+    #[arg(short = 'h', long = "help", action = ArgAction::Help, help_heading = "Help")]
+    pub _help: Option<bool>,
 }

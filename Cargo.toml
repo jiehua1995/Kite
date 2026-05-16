@@ -1,6 +1,6 @@
 [package]
 name = "kite"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 description = "K-mer indexing and throughput engine"
 authors = ["Jie Hua <Jie.Hua@lmu.de>"]
@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
+ctrlc = "3"
 flate2 = { version = "1", features = ["zlib-ng"] }
 byteorder = "1"
 memmap2 = "0.9"
@@ -28,6 +29,7 @@ rayon = "1"
 libc = "0.2"
 num_cpus = "1"
 anyhow = "1"
+indicatif = "0.17"
 itoa = "1"
 zstd = { version = "0.13", default-features = false, features = ["zstdmt"] }
 

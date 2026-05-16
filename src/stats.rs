@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Statistics collected during `kite count`.
@@ -33,7 +33,6 @@ pub struct CountStats {
     pub least_partition_segments: AtomicU64,
 }
 
-#[allow(dead_code)]
 impl CountStats {
     pub fn new(partitions: usize, timing_enabled: bool) -> Self {
         let mut s = CountStats::default();
@@ -41,11 +40,6 @@ impl CountStats {
         s.bucket_kmer_counts = (0..partitions).map(|_| AtomicU64::new(0)).collect();
         s.bucket_run_counts = (0..partitions).map(|_| AtomicU64::new(0)).collect();
         s
-    }
-
-    #[inline]
-    pub fn timing_enabled(&self) -> bool {
-        self.timing_enabled
     }
 
     pub fn add_reads(&self, n: u64) {
@@ -66,48 +60,12 @@ impl CountStats {
     pub fn add_decomp_bytes(&self, n: u64) {
         self.decomp_bytes_produced.fetch_add(n, Ordering::Relaxed);
     }
-    pub fn inc_flush(&self) {
-        self.flush_count.fetch_add(1, Ordering::Relaxed);
-    }
-    pub fn inc_runs(&self) {
-        self.total_runs.fetch_add(1, Ordering::Relaxed);
-    }
-    pub fn add_run_bytes(&self, n: u64) {
-        self.total_run_bytes.fetch_add(n, Ordering::Relaxed);
-    }
-    pub fn add_sort_ns(&self, n: u64) {
-        self.sort_ns.fetch_add(n, Ordering::Relaxed);
-    }
-    pub fn add_rle_ns(&self, n: u64) {
-        self.rle_ns.fetch_add(n, Ordering::Relaxed);
-    }
-    pub fn add_encode_ns(&self, n: u64) {
-        self.encode_ns.fetch_add(n, Ordering::Relaxed);
-    }
     pub fn add_finalize_ns(&self, n: u64) {
         self.finalize_ns.fetch_add(n, Ordering::Relaxed);
-    }
-    #[allow(dead_code)]
-    pub fn add_writer_queue_wait_ns(&self, n: u64) {
-        self.writer_queue_wait_ns.fetch_add(n, Ordering::Relaxed);
-    }
-    #[allow(dead_code)]
-    pub fn add_writer_io_ns(&self, n: u64) {
-        self.writer_io_ns.fetch_add(n, Ordering::Relaxed);
     }
     pub fn add_decomp_ns(&self, n: u64) {
         self.decomp_ns.fetch_add(n, Ordering::Relaxed);
     }
-    pub fn add_kmer_ns(&self, n: u64) {
-        self.kmer_ns.fetch_add(n, Ordering::Relaxed);
-    }
-    pub fn add_parse_ns(&self, n: u64) {
-        self.parse_ns.fetch_add(n, Ordering::Relaxed);
-    }
-    pub fn add_read_ns(&self, n: u64) {
-        self.read_ns.fetch_add(n, Ordering::Relaxed);
-    }
-
     pub fn add_bucket_kmers(&self, bucket: usize, n: u64) {
         if bucket < self.bucket_kmer_counts.len() {
             self.bucket_kmer_counts[bucket].fetch_add(n, Ordering::Relaxed);
@@ -132,6 +90,10 @@ impl CountStats {
         args: &crate::cli::CountArgs,
         actual_threads: usize,
         actual_partitions: usize,
+        output_bytes: u64,
+        data_area_bytes: u64,
+        total_chunks: u64,
+        total_rows: u64,
         wall: Duration,
     ) {
         let reads = self.reads_processed.load(Ordering::Relaxed);
@@ -157,47 +119,74 @@ impl CountStats {
         let peak_rss_mb = get_peak_rss_mb();
         let cpu_util_pct = get_process_cpu_util_pct(wall);
 
-        eprintln!("=== kite count test-mode report ===");
-        eprintln!("  input file:           {}", args.input);
-        eprintln!("  k:                    {}", args.k);
-        eprintln!("  canonical:            {}", args.canonical);
-        eprintln!("  threads:              {}", actual_threads);
-        eprintln!("  partitions:           {}", actual_partitions);
-        eprintln!("  chunk-kmers:          {}", args.chunk_kmers);
-        eprintln!(
-            "  memory:               {}",
-            args.memory.as_deref().unwrap_or("auto")
-        );
-        eprintln!("  buffer-mb:            {}", args.buffer);
-        eprintln!("  ---");
-        eprintln!("  compressed bytes read:    {}", fmt_bytes(comp));
-        eprintln!("  decompressed bytes:       {}", fmt_bytes(decomp));
-        eprintln!("  reads processed:          {}", fmt_num(reads));
-        eprintln!("  bases processed:          {}", fmt_num(bases));
-        eprintln!("  kmers generated:          {}", fmt_num(kmers));
-        eprintln!("  valid kmers generated:    {}", fmt_num(valid));
-        eprintln!("  ---");
-        eprintln!("  total flushes:        {}", flushes);
-        eprintln!("  total runs:           {}", runs);
-        eprintln!(
-            "  avg run entries:      {}",
-            if runs > 0 { valid / runs } else { 0 }
-        );
-        eprintln!("  run bytes written:    {}", fmt_bytes(run_bytes));
-        eprintln!("  ---");
-        eprintln!("  read_ms:              {}", read_ms);
-        eprintln!("  decomp_ms:            {}", decomp_ms);
-        eprintln!("  parse_ms:             {}", parse_ms);
-        eprintln!("  kmer_scan_ms:         {}", kmer_ms);
-        eprintln!("  sort_ms:              {}", sort_ms);
-        eprintln!("  rle_ms:               {}", rle_ms);
-        eprintln!("  encode_ms:            {}", encode_ms);
-        eprintln!("  finalize_ms:          {}", finalize_ms);
-        eprintln!("  writer_queue_wait_ms: {}", writer_queue_wait_ms);
-        eprintln!("  writer_io_ms:         {}", writer_io_ms);
-        eprintln!("  total wall time:      {:.3}s", wall.as_secs_f64());
-        eprintln!("  cpu_util_pct:         {:.1}", cpu_util_pct);
-        eprintln!("  peak_rss_mb:          {}", peak_rss_mb);
+        let mut sections = vec![
+            ReportSection::new(
+                "configuration",
+                vec![
+                    ("input", args.input.clone()),
+                    ("k", args.k.to_string()),
+                    ("canonical", args.canonical.to_string()),
+                    ("threads", actual_threads.to_string()),
+                    ("partitions", actual_partitions.to_string()),
+                    ("chunk_kmers", args.chunk_kmers.to_string()),
+                    (
+                        "memory",
+                        args.memory.as_deref().unwrap_or("auto").to_string(),
+                    ),
+                    ("buffer_mb", args.buffer.to_string()),
+                ],
+            ),
+            ReportSection::new(
+                "throughput",
+                vec![
+                    ("compressed_bytes_read", fmt_bytes(comp)),
+                    ("decompressed_bytes", fmt_bytes(decomp)),
+                    ("reads_processed", fmt_num(reads)),
+                    ("bases_processed", fmt_num(bases)),
+                    ("kmers_generated", fmt_num(kmers)),
+                    ("valid_kmers_generated", fmt_num(valid)),
+                ],
+            ),
+            ReportSection::new(
+                "storage",
+                vec![
+                    ("output_bytes", fmt_bytes(output_bytes)),
+                    ("data_area_bytes", fmt_bytes(data_area_bytes)),
+                    ("total_chunks", fmt_num(total_chunks)),
+                    ("total_rows", fmt_num(total_rows)),
+                    ("total_flushes", flushes.to_string()),
+                    ("total_runs", runs.to_string()),
+                    (
+                        "avg_run_entries",
+                        if runs > 0 { valid / runs } else { 0 }.to_string(),
+                    ),
+                    ("run_bytes_written", fmt_bytes(run_bytes)),
+                ],
+            ),
+            ReportSection::new(
+                "timing",
+                vec![
+                    ("total_wall_time", fmt_seconds(wall)),
+                    ("read", fmt_millis(read_ms)),
+                    ("decompress", fmt_millis(decomp_ms)),
+                    ("parse", fmt_millis(parse_ms)),
+                    ("kmer_scan", fmt_millis(kmer_ms)),
+                    ("sort", fmt_millis(sort_ms)),
+                    ("rle", fmt_millis(rle_ms)),
+                    ("encode", fmt_millis(encode_ms)),
+                    ("finalize", fmt_millis(finalize_ms)),
+                    ("writer_queue_wait", fmt_millis(writer_queue_wait_ms)),
+                    ("writer_io", fmt_millis(writer_io_ms)),
+                ],
+            ),
+            ReportSection::new(
+                "resources",
+                vec![
+                    ("cpu_util_pct", format!("{:.1}", cpu_util_pct)),
+                    ("peak_rss_mb", peak_rss_mb.to_string()),
+                ],
+            ),
+        ];
         // Bucket distribution
         let n_buckets = self.bucket_kmer_counts.len();
         if n_buckets > 0 {
@@ -221,33 +210,37 @@ impl CountStats {
                 .map(|(i, c)| (c, i))
                 .collect();
             sorted_b.sort_unstable_by(|a, b| b.0.cmp(&a.0));
-            eprintln!("  ---");
-            eprintln!("  bucket count:         {}", n_buckets);
-            eprintln!("  avg kmers/bucket:     {}", avg_b);
-            eprintln!("  max kmers/bucket:     {}", max_b);
-            eprintln!(
-                "  hottest_partition_segments: {}",
-                self.hottest_partition_segments.load(Ordering::Relaxed)
-            );
-            eprintln!(
-                "  least_partition_segments:   {}",
-                self.least_partition_segments.load(Ordering::Relaxed)
-            );
-            eprintln!("  hottest buckets:");
+            let mut rows = vec![
+                ("bucket_count", n_buckets.to_string()),
+                ("avg_kmers_per_bucket", fmt_num(avg_b)),
+                ("max_kmers_per_bucket", fmt_num(max_b)),
+                (
+                    "hottest_partition_segments",
+                    self.hottest_partition_segments
+                        .load(Ordering::Relaxed)
+                        .to_string(),
+                ),
+                (
+                    "least_partition_segments",
+                    self.least_partition_segments
+                        .load(Ordering::Relaxed)
+                        .to_string(),
+                ),
+            ];
             for (cnt, idx) in sorted_b.iter().take(5) {
-                eprintln!(
-                    "    bucket {:4}:  {} kmers  ({:.2}%)",
-                    idx,
-                    cnt,
-                    if total_b > 0 {
-                        *cnt as f64 / total_b as f64 * 100.0
-                    } else {
-                        0.0
-                    }
-                );
+                let pct = if total_b > 0 {
+                    *cnt as f64 / total_b as f64 * 100.0
+                } else {
+                    0.0
+                };
+                rows.push((
+                    "hot_bucket",
+                    format!("#{}: {} kmers ({:.2}%)", idx, fmt_num(*cnt), pct),
+                ));
             }
+            sections.push(ReportSection::new("distribution", rows));
         }
-        eprintln!("====================================");
+        print_test_report("count", sections);
     }
 }
 
@@ -364,18 +357,6 @@ impl DumpStats {
     pub fn add_format_ns(&self, n: u64) {
         self.format_ns.fetch_add(n, Ordering::Relaxed);
     }
-    #[allow(dead_code)]
-    pub fn add_writer_queue_wait_ns(&self, n: u64) {
-        self.writer_queue_wait_ns.fetch_add(n, Ordering::Relaxed);
-    }
-    #[allow(dead_code)]
-    pub fn add_writer_io_ns(&self, n: u64) {
-        self.writer_io_ns.fetch_add(n, Ordering::Relaxed);
-    }
-    #[allow(dead_code)]
-    pub fn add_concat_ns(&self, n: u64) {
-        self.concat_ns.fetch_add(n, Ordering::Relaxed);
-    }
     pub fn inc_partitions(&self) {
         self.partitions_processed.fetch_add(1, Ordering::Relaxed);
     }
@@ -425,76 +406,98 @@ impl DumpStats {
             0.0
         };
 
-        eprintln!("=== kite dump test-mode report ===");
-        eprintln!("  input .kite:          {}", args.input);
-        eprintln!("  output:               {}", args.output);
-        eprintln!("  threads:              {}", actual_threads);
-        eprintln!("  partition count:      {}", n_buckets);
-        eprintln!("  total chunks:         {}", total_runs);
-        eprintln!("  ---");
-        eprintln!("  total rows output:    {}", fmt_num(rows));
-        eprintln!("  bytes read:           {}", fmt_bytes(bread));
-        eprintln!("  bytes written:        {}", fmt_bytes(bwrite));
-        eprintln!("  ---");
-        eprintln!("  decode_ms:            {}", decode_ms);
-        eprintln!("  merge_ms:             {}", merge_ms);
-        eprintln!("  format_ms:            {}", format_ms);
-        eprintln!("  writer_queue_wait_ms: {}", writer_queue_wait_ms);
-        eprintln!("  writer_io_ms:         {}", writer_io_ms);
-        eprintln!("  tsv_write_ms:         {}", writer_io_ms);
-        eprintln!("  concat_ms:            {}", concat_ms);
-        eprintln!("  longest_worker_ms:    {}", longest_worker_ms);
-        eprintln!("  shortest_worker_ms:   {}", shortest_worker_ms);
-        eprintln!("  total wall time:      {:.3}s", wall.as_secs_f64());
-        eprintln!("  dump_throughput_mb_s: {:.1}", throughput_mb_s);
-        eprintln!("  cpu_util_pct:         {:.1}", cpu_util_pct);
-        eprintln!("  peak_rss_mb:          {}", peak_rss_mb);
-        eprintln!(
-            "  hottest_partition_chunks: {}",
-            self.hottest_partition_chunks.load(Ordering::Relaxed)
+        print_test_report(
+            "dump",
+            vec![
+                ReportSection::new(
+                    "configuration",
+                    vec![
+                        ("input", args.input.clone()),
+                        ("output", args.output.clone()),
+                        ("threads", actual_threads.to_string()),
+                        ("partitions", n_buckets.to_string()),
+                        ("total_chunks", total_runs.to_string()),
+                    ],
+                ),
+                ReportSection::new(
+                    "throughput",
+                    vec![
+                        ("total_rows_output", fmt_num(rows)),
+                        ("bytes_read", fmt_bytes(bread)),
+                        ("bytes_written", fmt_bytes(bwrite)),
+                        ("dump_throughput_mb_s", format!("{:.1}", throughput_mb_s)),
+                    ],
+                ),
+                ReportSection::new(
+                    "timing",
+                    vec![
+                        ("total_wall_time", fmt_seconds(wall)),
+                        ("decode", fmt_millis(decode_ms)),
+                        ("merge", fmt_millis(merge_ms)),
+                        ("format", fmt_millis(format_ms)),
+                        ("writer_queue_wait", fmt_millis(writer_queue_wait_ms)),
+                        ("writer_io", fmt_millis(writer_io_ms)),
+                        ("concat", fmt_millis(concat_ms)),
+                        ("longest_worker", fmt_millis(longest_worker_ms)),
+                        ("shortest_worker", fmt_millis(shortest_worker_ms)),
+                    ],
+                ),
+                ReportSection::new(
+                    "resources",
+                    vec![
+                        ("cpu_util_pct", format!("{:.1}", cpu_util_pct)),
+                        ("peak_rss_mb", peak_rss_mb.to_string()),
+                    ],
+                ),
+                ReportSection::new(
+                    "distribution",
+                    vec![
+                        (
+                            "hottest_partition_chunks",
+                            self.hottest_partition_chunks
+                                .load(Ordering::Relaxed)
+                                .to_string(),
+                        ),
+                        (
+                            "coldest_partition_chunks",
+                            self.coldest_partition_chunks
+                                .load(Ordering::Relaxed)
+                                .to_string(),
+                        ),
+                        (
+                            "p99_chunk_bytes",
+                            self.p99_chunk_bytes.load(Ordering::Relaxed).to_string(),
+                        ),
+                        (
+                            "shard_count",
+                            self.shard_count.load(Ordering::Relaxed).to_string(),
+                        ),
+                        (
+                            "hottest_shard_partitions",
+                            self.hottest_shard_partitions
+                                .load(Ordering::Relaxed)
+                                .to_string(),
+                        ),
+                        (
+                            "coldest_shard_partitions",
+                            self.coldest_shard_partitions
+                                .load(Ordering::Relaxed)
+                                .to_string(),
+                        ),
+                        (
+                            "hottest_shard_bytes",
+                            fmt_bytes(self.hottest_shard_bytes.load(Ordering::Relaxed)),
+                        ),
+                        (
+                            "coldest_shard_bytes",
+                            fmt_bytes(self.coldest_shard_bytes.load(Ordering::Relaxed)),
+                        ),
+                    ],
+                ),
+            ],
         );
-        eprintln!(
-            "  coldest_partition_chunks: {}",
-            self.coldest_partition_chunks.load(Ordering::Relaxed)
-        );
-        eprintln!(
-            "  hottest_partition_segments: {}",
-            self.hottest_partition_chunks.load(Ordering::Relaxed)
-        );
-        eprintln!(
-            "  least_partition_segments:   {}",
-            self.coldest_partition_chunks.load(Ordering::Relaxed)
-        );
-        eprintln!(
-            "  p99_chunk_bytes:      {}",
-            self.p99_chunk_bytes.load(Ordering::Relaxed)
-        );
-        eprintln!(
-            "  shard_count:          {}",
-            self.shard_count.load(Ordering::Relaxed)
-        );
-        eprintln!(
-            "  hottest_shard_partitions: {}",
-            self.hottest_shard_partitions.load(Ordering::Relaxed)
-        );
-        eprintln!(
-            "  coldest_shard_partitions: {}",
-            self.coldest_shard_partitions.load(Ordering::Relaxed)
-        );
-        eprintln!(
-            "  hottest_shard_bytes:  {}",
-            self.hottest_shard_bytes.load(Ordering::Relaxed)
-        );
-        eprintln!(
-            "  coldest_shard_bytes:  {}",
-            self.coldest_shard_bytes.load(Ordering::Relaxed)
-        );
-        eprintln!("===================================");
     }
 }
-
-#[allow(dead_code)]
-pub type SharedDumpStats = Arc<DumpStats>;
 
 fn fmt_bytes(n: u64) -> String {
     if n >= 1024 * 1024 * 1024 {
@@ -560,34 +563,70 @@ pub fn get_process_cpu_util_pct(wall: Duration) -> f64 {
     0.0
 }
 
+pub struct ReportSection {
+    title: String,
+    rows: Vec<(String, String)>,
+}
+
+impl ReportSection {
+    pub fn new(title: impl Into<String>, rows: Vec<(&str, String)>) -> Self {
+        Self {
+            title: title.into(),
+            rows: rows
+                .into_iter()
+                .map(|(label, value)| (label.to_string(), value))
+                .collect(),
+        }
+    }
+}
+
+pub fn print_test_report(command: &str, sections: Vec<ReportSection>) {
+    let prefix = format!("[kite {}]", command);
+    let width = sections
+        .iter()
+        .flat_map(|section| section.rows.iter().map(|(label, _)| label.len()))
+        .max()
+        .unwrap_or(0);
+
+    eprintln!("{} === test-mode report ===", prefix);
+    for section in sections {
+        eprintln!("{} -- {} --", prefix, section.title);
+        for (label, value) in section.rows {
+            eprintln!("{}   {:width$}: {}", prefix, label, value, width = width);
+        }
+    }
+    eprintln!("{} === end test-mode report ===", prefix);
+}
+
 pub fn print_simple_test_report(command: &str, entries: &[(&str, String)], wall: Duration) {
     let cpu_util_pct = get_process_cpu_util_pct(wall);
     let peak_rss_mb = get_peak_rss_mb();
-    let width = entries
-        .iter()
-        .map(|(label, _)| label.len())
-        .max()
-        .unwrap_or(0)
-        .max("total wall time".len())
-        .max("cpu_util_pct".len())
-        .max("peak_rss_mb".len());
+    print_test_report(
+        command,
+        vec![
+            ReportSection::new(
+                "summary",
+                entries
+                    .iter()
+                    .map(|(label, value)| (*label, value.clone()))
+                    .collect(),
+            ),
+            ReportSection::new("timing", vec![("total_wall_time", fmt_seconds(wall))]),
+            ReportSection::new(
+                "resources",
+                vec![
+                    ("cpu_util_pct", format!("{:.1}", cpu_util_pct)),
+                    ("peak_rss_mb", peak_rss_mb.to_string()),
+                ],
+            ),
+        ],
+    );
+}
 
-    eprintln!("=== kite {} test-mode report ===", command);
-    for (label, value) in entries {
-        eprintln!("  {:width$}: {}", label, value, width = width);
-    }
-    eprintln!(
-        "  {:width$}: {:.3}s",
-        "total wall time",
-        wall.as_secs_f64(),
-        width = width
-    );
-    eprintln!(
-        "  {:width$}: {:.1}",
-        "cpu_util_pct",
-        cpu_util_pct,
-        width = width
-    );
-    eprintln!("  {:width$}: {}", "peak_rss_mb", peak_rss_mb, width = width);
-    eprintln!("====================================");
+fn fmt_seconds(duration: Duration) -> String {
+    format!("{:.3}s", duration.as_secs_f64())
+}
+
+fn fmt_millis(ms: u64) -> String {
+    format!("{}ms", ms)
 }

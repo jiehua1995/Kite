@@ -13,6 +13,8 @@ use crate::stats::print_simple_test_report;
 
 pub fn run_query(args: &QueryArgs) -> anyhow::Result<()> {
     let started = Instant::now();
+    eprintln!("[kite query] opening: {}", args.input);
+    eprintln!("[kite query] query:   {}", args.kmer);
     let reader = Arc::new(
         KiteReader::open(&args.input).with_context(|| format!("failed to open {}", args.input))?,
     );
@@ -50,5 +52,9 @@ pub fn run_query(args: &QueryArgs) -> anyhow::Result<()> {
             started.elapsed(),
         );
     }
+    eprintln!(
+        "[kite query] done in {:.3}s",
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }

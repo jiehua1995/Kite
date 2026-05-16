@@ -1,8 +1,8 @@
 use itoa;
 
 /// Lookup table: each byte encodes 4 DNA bases (2 bits each, MSB-first).
-/// BASE4_TABLE[byte] = [base0, base1, base2, base3]
-/// base_i = DNA[(byte >> (6 - 2*i)) & 3]
+/// `BASE4_TABLE[byte] = [base0, base1, base2, base3]`
+/// `base_i = DNA[(byte >> (6 - 2*i)) & 3]`
 /// Used by the fast 4-at-a-time k-mer decode routines.
 const fn make_4base_table() -> [[u8; 4]; 256] {
     let dna = [b'A', b'C', b'G', b'T'];
@@ -106,7 +106,7 @@ pub fn decode_kmer_u256(lo: u128, hi: u128, k: u8, buf: &mut [u8]) {
     }
 }
 
-/// Format a single TSV line into buf: "<kmer>\t<count>\n"
+/// Format a single TSV line into `buf`: `"<kmer>\t<count>\n"`.
 /// Uses a reused itoa buffer to avoid per-line formatter construction.
 #[inline]
 pub fn format_tsv_line(kmer: &[u8], count: u32, buf: &mut Vec<u8>, count_buf: &mut itoa::Buffer) {

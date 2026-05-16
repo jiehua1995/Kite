@@ -1,10 +1,10 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 
-use crossbeam_channel::{Sender, bounded};
+use crossbeam_channel::{bounded, Sender};
 
 use crate::count::memory::SharedBudget;
 use crate::format::{ChunkIndexEntry, KiteHeader, Kx2Footer, PartitionEntry};
@@ -201,7 +201,11 @@ impl ConcurrentKiteWriter {
         }
 
         let flush_len = staging.buffer.len();
-        let data = std::mem::take(&mut staging.buffer);
+        let replacement_capacity = staging.buffer.capacity().max(self.staging_bytes);
+        let data = std::mem::replace(
+            &mut staging.buffer,
+            Vec::with_capacity(replacement_capacity),
+        );
         let offset = self.claim_offset_and_enqueue(data)?;
 
         self.staged_bytes.fetch_sub(flush_len, Ordering::Relaxed);
@@ -458,7 +462,6 @@ impl ConcurrentKiteWriter {
         raw_file.seek(SeekFrom::Start(0))?;
         raw_file.write_all(&header_buf)?;
         raw_file.set_len(total_size)?;
-        raw_file.sync_all()?;
 
         Ok(FinalizeSummary {
             total_chunks,

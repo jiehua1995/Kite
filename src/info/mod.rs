@@ -10,6 +10,7 @@ use crate::stats::print_simple_test_report;
 
 pub fn run_info(args: &InfoArgs) -> anyhow::Result<()> {
     let started = Instant::now();
+    eprintln!("[kite info] opening: {}", args.input);
     let reader =
         KiteReader::open(&args.input).with_context(|| format!("failed to open {}", args.input))?;
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
@@ -111,5 +112,9 @@ pub fn run_info(args: &InfoArgs) -> anyhow::Result<()> {
             wall,
         );
     }
+    eprintln!(
+        "[kite info] done in {:.3}s",
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }

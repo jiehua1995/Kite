@@ -18,6 +18,10 @@ use clap::Parser;
 use cli::{Cli, Commands};
 
 fn main() -> anyhow::Result<()> {
+    let _ = ctrlc::set_handler(|| {
+        eprintln!("\n[kite] interrupted");
+        std::process::exit(130);
+    });
     let cli = Cli::parse();
     match &cli.command {
         Commands::Count(args) => count::run_count(args)?,

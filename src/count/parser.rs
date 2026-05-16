@@ -65,7 +65,7 @@ where
 }
 
 /// Count records and bases seen in a FASTQ chunk.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn count_records_and_bases(data: &[u8]) -> (u64, u64) {
     let mut reads = 0u64;
     let mut bases = 0u64;

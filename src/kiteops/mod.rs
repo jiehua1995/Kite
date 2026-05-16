@@ -4,14 +4,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail, Context};
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::count::kmer::{KmerIter, KmerIter128, KmerIterU256};
 use crate::dump::decoder::{decode_kmer_any, decode_kmer_u256};
 use crate::dump::reader::KiteReader;
-use crate::format::header::{KEY_WIDTH_U64, KEY_WIDTH_U128, KEY_WIDTH_U256};
+use crate::format::header::{KEY_WIDTH_U128, KEY_WIDTH_U256, KEY_WIDTH_U64};
 use crate::format::run_block::{
-    encode_dvle_u64, encode_dvle_u128, read_varint_u64, read_varint_u128,
+    encode_dvle_u128, encode_dvle_u64, read_varint_u128, read_varint_u64,
 };
 use crate::format::{CODEC_DVLE, CODEC_RAW};
 
@@ -239,29 +240,73 @@ pub fn key_to_string(key: KmerKey, meta: &CompatibleMetadata) -> String {
     String::from_utf8(buf).unwrap_or_else(|_| "N".repeat(meta.k as usize))
 }
 
-pub fn print_partition_progress(
-    tag: &str,
-    enabled: bool,
-    done: usize,
+pub struct PartitionProgress {
+    bar: Option<ProgressBar>,
+    command: String,
     total: usize,
     started: Instant,
-) {
-    if !enabled {
-        return;
+}
+
+impl PartitionProgress {
+    pub fn new(command: impl Into<String>, enabled: bool, total: usize, started: Instant) -> Self {
+        let command = command.into();
+        let bar = enabled.then(|| {
+            let bar = ProgressBar::new(total.max(1) as u64);
+            let style = ProgressStyle::with_template(
+                "{spinner:.green} {msg}\n[{bar:40.cyan/blue}] {percent:>3}% | {pos}/{len} partitions | eta {eta_precise}",
+            )
+            .unwrap_or_else(|_| ProgressStyle::default_bar());
+            bar.set_style(style.progress_chars("=>-"));
+            bar.enable_steady_tick(std::time::Duration::from_millis(120));
+            bar
+        });
+        Self {
+            bar,
+            command,
+            total,
+            started,
+        }
     }
-    let pct = if total > 0 {
-        done as f64 * 100.0 / total as f64
+
+    pub fn update(&self, done: usize) {
+        let Some(bar) = &self.bar else {
+            return;
+        };
+        let total = self.total.max(done).max(1);
+        bar.set_length(total as u64);
+        bar.set_position(done.min(total) as u64);
+        bar.set_message(format!(
+            "{} | elapsed {}",
+            self.command,
+            format_duration_compact(self.started.elapsed()),
+        ));
+    }
+
+    pub fn finish(&self) {
+        if let Some(bar) = &self.bar {
+            bar.finish_and_clear();
+        }
+    }
+}
+
+impl Drop for PartitionProgress {
+    fn drop(&mut self) {
+        if let Some(bar) = &self.bar {
+            bar.finish_and_clear();
+        }
+    }
+}
+
+fn format_duration_compact(duration: std::time::Duration) -> String {
+    let total_secs = duration.as_secs();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
     } else {
-        100.0
-    };
-    eprintln!(
-        "[kite {}] partitions {}/{} ({:.1}%) elapsed {:.1}s",
-        tag,
-        done,
-        total,
-        pct,
-        started.elapsed().as_secs_f64()
-    );
+        format!("{:02}:{:02}", minutes, seconds)
+    }
 }
 
 pub fn load_partition_counts(

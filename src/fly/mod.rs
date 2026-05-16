@@ -9,6 +9,14 @@ use crate::stats::print_simple_test_report;
 
 pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
     let started = Instant::now();
+    eprintln!(
+        "[kite fly] inputs={}, output_dir={}, k={}, canonical={}, threads={}",
+        args.inputs.len(),
+        args.output_dir,
+        args.k,
+        args.canonical,
+        args.threads,
+    );
     std::fs::create_dir_all(&args.output_dir)?;
     let db_dir = Path::new(&args.output_dir).join("databases");
     let analysis_dir = Path::new(&args.output_dir).join("analysis");
@@ -34,11 +42,12 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
             partitions: 0,
             chunk_kmers: 8_000_000,
             memory: args.memory.clone(),
-            canonical: true,
+            canonical: args.canonical,
             progress: args.progress,
             test_mode: false,
             mode: crate::cli::CountMode::Fast,
             buffer: 16,
+            _help: None,
         };
         count::run_count(&count_args)?;
         kite_inputs.push(output_path.to_string_lossy().to_string());
@@ -56,6 +65,7 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
         cluster_samples: args.cluster_samples,
         progress: args.progress,
         test_mode: false,
+        _help: None,
     };
     analyze::run_analyze(&analyze_args)?;
     if args.test_mode {
@@ -65,11 +75,13 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
                 ("inputs", args.inputs.len().to_string()),
                 ("labels", labels.join(",")),
                 ("k", args.k.to_string()),
+                ("canonical", args.canonical.to_string()),
                 ("threads", args.threads.to_string()),
                 ("output_dir", args.output_dir.clone()),
             ],
             started.elapsed(),
         );
     }
+    eprintln!("[kite fly] done in {:.3}s", started.elapsed().as_secs_f64());
     Ok(())
 }

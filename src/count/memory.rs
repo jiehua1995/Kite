@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 /// Global memory budget tracker.
@@ -19,6 +19,13 @@ impl MemoryBudget {
             current: AtomicUsize::new(0),
             limit,
             flush_threshold,
+        }
+    }
+
+    #[inline]
+    pub fn acquire(&self, bytes: usize) {
+        while !self.try_acquire(bytes) {
+            thread::yield_now();
         }
     }
 
@@ -48,13 +55,6 @@ impl MemoryBudget {
     }
 
     #[inline]
-    pub fn acquire(&self, bytes: usize) {
-        while !self.try_acquire(bytes) {
-            thread::yield_now();
-        }
-    }
-
-    #[inline]
     pub fn free(&self, bytes: usize) {
         // Saturating sub to avoid underflow from racing alloc/free
         let _ = self
@@ -64,7 +64,6 @@ impl MemoryBudget {
             });
     }
 
-    #[allow(dead_code)]
     #[inline]
     pub fn current_bytes(&self) -> usize {
         self.current.load(Ordering::Relaxed)
@@ -75,15 +74,9 @@ impl MemoryBudget {
         self.current.load(Ordering::Relaxed) >= self.flush_threshold
     }
 
-    #[allow(dead_code)]
     #[inline]
     pub fn is_over_limit(&self) -> bool {
         self.current.load(Ordering::Relaxed) >= self.limit
-    }
-
-    #[allow(dead_code)]
-    pub fn flush_threshold(&self) -> usize {
-        self.flush_threshold
     }
 
     #[inline]

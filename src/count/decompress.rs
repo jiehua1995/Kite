@@ -1,29 +1,11 @@
 use std::io::{self, Read};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-/// A reusable buffer chunk. Returned to the pool after use.
-#[allow(dead_code)]
-pub struct Chunk {
-    pub data: Vec<u8>,
-}
-
-#[allow(dead_code)]
-impl Chunk {
-    pub fn new(capacity: usize) -> Self {
-        Chunk {
-            data: Vec::with_capacity(capacity),
-        }
-    }
-    pub fn clear(&mut self) {
-        self.data.clear();
-    }
-}
+use std::sync::Arc;
 
 /// Decompress a gzipped reader into large chunks, respecting FASTQ record
 /// boundaries so each chunk starts at the beginning of a FASTQ record.
 ///
-/// Returns chunks via a crossbeam channel. Each chunk is a Vec<u8> of
+/// Returns chunks via a crossbeam channel. Each chunk is a `Vec<u8>` of
 /// decompressed FASTQ bytes aligned to a record boundary.
 ///
 /// The chunk_bytes parameter controls decompressed chunk size (target size).
@@ -33,8 +15,6 @@ pub struct GzipChunkedReader<R: Read> {
     buf: Vec<u8>,
     carry: Vec<u8>, // bytes from the tail of the previous chunk that belong to next record
     chunk_size: usize,
-    #[allow(dead_code)]
-    pub bytes_read: Arc<AtomicU64>,
     pub bytes_decomp: Arc<AtomicU64>,
 }
 
@@ -46,14 +26,13 @@ impl<R: Read> GzipChunkedReader<R> {
             buf: Vec::with_capacity(chunk_size + 4096),
             carry: Vec::new(),
             chunk_size,
-            bytes_read: Arc::new(AtomicU64::new(0)),
             bytes_decomp: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Read and decompress the next aligned chunk.
     /// Returns Ok(None) when the stream is exhausted.
-    /// Each returned Vec<u8> starts at the beginning of a FASTQ '@' record.
+    /// Each returned `Vec<u8>` starts at the beginning of a FASTQ '@' record.
     pub fn next_chunk(&mut self) -> io::Result<Option<Vec<u8>>> {
         // Start chunk with leftover carry from previous boundary alignment
         let mut chunk = Vec::with_capacity(self.chunk_size + self.carry.len());

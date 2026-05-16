@@ -4,29 +4,32 @@ pub mod kmer;
 pub mod memory;
 pub mod parser;
 pub mod reader;
-pub mod router;
 pub mod sorter;
 pub mod worker;
 pub mod writer;
 
-use std::io::{IsTerminal, Write};
+use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::bounded;
+use flate2::read::GzDecoder;
+use indicatif::{ProgressBar, ProgressStyle};
+use memmap2::Mmap;
 
 use crate::cli::CountArgs;
+use crate::count::bgzf::{find_fastq_split_4lines, scan_bgzf_blocks};
 use crate::count::decompress::{GzipChunkedReader, PlainChunkedReader};
 use crate::count::kmer::{KmerU256, KmerWord};
 use crate::count::memory::MemoryBudget;
 use crate::count::parser::parse_sequences;
-use crate::count::reader::{CompressionType, detect_compression, open_input};
+use crate::count::reader::{detect_compression, open_input, CompressionType};
 use crate::count::worker::CountWorker;
 use crate::count::writer::ConcurrentKiteWriter;
-use crate::format::header::{KEY_WIDTH_U64, KEY_WIDTH_U128, KEY_WIDTH_U256};
+use crate::format::header::{KEY_WIDTH_U128, KEY_WIDTH_U256, KEY_WIDTH_U64};
 use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
 use crate::runtime::{apply_process_memory_limit, resolve_memory_limit_bytes};
 use crate::stats::CountStats;
@@ -45,7 +48,8 @@ const SAMPLE_MAX_READS: u64 = 200_000;
 struct InputSample {
     avg_read_len: f64,
     sampled_reads: u64,
-    sampled_bytes: usize,
+    sampled_input_bytes: u64,
+    sampled_decomp_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +58,8 @@ struct HeuristicPlan {
     input_bytes: u64,
     avg_read_len: f64,
     sampled_reads: u64,
-    sampled_bytes: usize,
+    sampled_input_bytes: u64,
+    sampled_decomp_bytes: usize,
     partitions: usize,
     staging_bytes: usize,
     decomp_threads: usize,
@@ -97,20 +102,14 @@ fn spawn_count_progress(
     Some((
         running,
         thread::spawn(move || {
-            let is_tty = std::io::stderr().is_terminal();
-            let mut rendered = false;
-            let mut last_fallback = Instant::now() - Duration::from_secs(60);
-            let total_header = format!(
-                "[kite count] total input={} est_reads={} est_kmers={} k={} threads={}/{}/{} mem_limit={:.2}GB",
-                fmt_bytes_compact(input_bytes),
-                fmt_num_compact(estimated_total_reads),
-                fmt_num_compact(estimated_total_kmers),
-                k,
-                total_threads,
-                decomp_threads,
-                worker_threads,
-                hard_memory_limit_bytes as f64 / GIB as f64,
-            );
+            let initial_total = estimated_total_reads.max(1);
+            let bar = ProgressBar::new(initial_total);
+            let style = ProgressStyle::with_template(
+                "{spinner:.green} {msg}\n[{bar:40.cyan/blue}] {percent:>3}% | {pos}/{len} reads | eta {eta_precise}",
+            )
+            .unwrap_or_else(|_| ProgressStyle::default_bar());
+            bar.set_style(style.progress_chars("=>-"));
+            bar.enable_steady_tick(Duration::from_millis(120));
             while running_flag.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(250));
                 if !running_flag.load(Ordering::Relaxed) {
@@ -121,59 +120,50 @@ fn spawn_count_progress(
                 let kmers = stats.valid_kmers_generated.load(Ordering::Relaxed);
                 let decomp = stats.decomp_bytes_produced.load(Ordering::Relaxed);
                 let rss = budget.current_bytes() as f64 / GIB as f64;
-                let progress = if estimated_total_reads > 0 {
-                    (reads as f64 / estimated_total_reads as f64).clamp(0.0, 0.999)
-                } else {
-                    0.0
-                };
-                let eta = if progress > 0.001 {
-                    Some(Duration::from_secs_f64(wall * (1.0 - progress) / progress))
-                } else {
-                    None
-                };
-                let detail = format!(
-                    "[kite count] done reads={}/{} ({:5.1}%) kmers={} decomp={} elapsed={} eta={} tracked_mem={:.2}GB",
-                    fmt_num_compact(reads),
-                    fmt_num_compact(estimated_total_reads),
-                    progress * 100.0,
+                let display_total_reads = estimated_total_reads.max(reads);
+                bar.set_length(display_total_reads.max(1));
+                bar.set_position(reads.min(display_total_reads));
+                bar.set_message(format!(
+                    "count input={} k={} threads={}/{}/{} mem={:.2}GB | kmers {}/{} | decomp {} | elapsed {} | tracked_mem {:.2}GB",
+                    fmt_bytes_compact(input_bytes),
+                    k,
+                    total_threads,
+                    decomp_threads,
+                    worker_threads,
+                    hard_memory_limit_bytes as f64 / GIB as f64,
                     fmt_num_compact(kmers),
+                    fmt_num_compact(estimated_total_kmers),
                     fmt_bytes_compact(decomp),
                     fmt_duration_compact(Duration::from_secs_f64(wall)),
-                    fmt_eta_compact(eta),
                     rss,
-                );
-
-                if is_tty {
-                    let mut stderr = std::io::stderr().lock();
-                    if rendered {
-                        let _ = write!(stderr, "\x1b[2F");
-                    }
-                    let _ = write!(stderr, "\x1b[2K{}\n\x1b[2K{}\n", total_header, detail);
-                    let _ = stderr.flush();
-                    rendered = true;
-                } else if last_fallback.elapsed() >= Duration::from_secs(15) {
-                    eprintln!("{} | {}", total_header, detail);
-                    last_fallback = Instant::now();
-                }
+                ));
             }
+            let reads = stats.reads_processed.load(Ordering::Relaxed);
+            let kmers = stats.valid_kmers_generated.load(Ordering::Relaxed);
+            let decomp = stats.decomp_bytes_produced.load(Ordering::Relaxed);
+            let display_total_reads = estimated_total_reads.max(reads).max(1);
+            let wall = started_at.elapsed().as_secs_f64();
+            bar.set_length(display_total_reads);
+            bar.set_position(reads.min(display_total_reads));
+            bar.set_message(format!(
+                "count done | reads {}/{} | kmers {} | decomp {} | elapsed {}",
+                fmt_num_compact(reads),
+                fmt_num_compact(display_total_reads),
+                fmt_num_compact(kmers),
+                fmt_bytes_compact(decomp),
+                fmt_duration_compact(Duration::from_secs_f64(wall)),
+            ));
+            bar.finish_and_clear();
+            eprintln!(
+                "[kite count] progress reads={}/{} kmers={} decomp={} elapsed={}",
+                fmt_num_compact(reads),
+                fmt_num_compact(display_total_reads),
+                fmt_num_compact(kmers),
+                fmt_bytes_compact(decomp),
+                fmt_duration_compact(Duration::from_secs_f64(wall)),
+            );
         }),
     ))
-}
-
-fn clear_progress_lines(line_count: usize) {
-    if !std::io::stderr().is_terminal() || line_count == 0 {
-        return;
-    }
-    let mut stderr = std::io::stderr().lock();
-    let _ = write!(stderr, "\x1b[{}F", line_count);
-    for index in 0..line_count {
-        let _ = write!(stderr, "\x1b[2K");
-        if index + 1 < line_count {
-            let _ = write!(stderr, "\n");
-        }
-    }
-    let _ = write!(stderr, "\r");
-    let _ = stderr.flush();
 }
 
 fn fmt_num_compact(value: u64) -> String {
@@ -210,11 +200,6 @@ fn fmt_duration_compact(duration: Duration) -> String {
     } else {
         format!("{:02}:{:02}", minutes, seconds)
     }
-}
-
-fn fmt_eta_compact(eta: Option<Duration>) -> String {
-    eta.map(fmt_duration_compact)
-        .unwrap_or_else(|| "--:--".to_string())
 }
 
 pub fn run_count(args: &CountArgs) -> anyhow::Result<()> {
@@ -276,10 +261,10 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     let budget = Arc::new(MemoryBudget::new(plan.tracked_budget_bytes));
     let stats = Arc::new(CountStats::new(plan.partitions, args.test_mode));
     let wall_start = Instant::now();
-    let estimated_total_reads = if plan.sampled_bytes > 0 && plan.sampled_reads > 0 {
+    let estimated_total_reads = if plan.sampled_input_bytes > 0 && plan.sampled_reads > 0 {
         ((plan.input_bytes as u128)
             .saturating_mul(plan.sampled_reads as u128)
-            .checked_div(plan.sampled_bytes as u128)
+            .checked_div(plan.sampled_input_bytes as u128)
             .unwrap_or(0)) as u64
     } else {
         0
@@ -305,36 +290,33 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     let writer_lanes = ConcurrentKiteWriter::suggest_write_lanes(plan.worker_threads);
     let bucket_shift = compute_bucket_bits(plan.partitions);
 
+    eprintln!("[kite count] input:       {}", args.input);
+    eprintln!("[kite count] output:      {}", args.output);
+    eprintln!("[kite count] compression: {}", compression);
+    eprintln!(
+        "[kite count] k={}, canonical={}, partitions={}",
+        args.k, args.canonical, plan.partitions
+    );
+    eprintln!(
+        "[kite count] mode={}, codec={}",
+        match args.mode {
+            crate::cli::CountMode::Fast => "fast",
+            crate::cli::CountMode::Balanced => "balanced",
+            crate::cli::CountMode::Compact => "compact",
+        },
+        codec_policy_label(K::entry_size(), args.mode.zstd_level())
+    );
+    eprintln!(
+        "[kite count] threads total={}, decomp={}, count_workers={}",
+        n_threads, plan.decomp_threads, plan.worker_threads
+    );
+    eprintln!(
+        "[kite count] memory_limit={:.1}GB (hard limit, tracked {:.1}GB, reserve {:.1}GB)",
+        plan.hard_memory_limit_bytes as f64 / GIB as f64,
+        budget.limit_bytes() as f64 / GIB as f64,
+        plan.untracked_reserve_bytes as f64 / GIB as f64,
+    );
     if args.test_mode {
-        eprintln!("[kite count] input:       {}", args.input);
-        eprintln!("[kite count] compression: {}", compression);
-        eprintln!(
-            "[kite count] k={}, canonical={}, partitions={}",
-            args.k, args.canonical, plan.partitions
-        );
-        eprintln!(
-            "[kite count] mode={}, codec={}",
-            match args.mode {
-                crate::cli::CountMode::Fast => "fast",
-                crate::cli::CountMode::Balanced => "balanced",
-                crate::cli::CountMode::Compact => "compact",
-            },
-            if K::entry_size() == 36 {
-                "raw-u256"
-            } else {
-                "dvle-only"
-            }
-        );
-        eprintln!(
-            "[kite count] threads total={}, decomp={}, count_workers={}",
-            n_threads, plan.decomp_threads, plan.worker_threads
-        );
-        eprintln!(
-            "[kite count] memory_limit={:.1}GB (hard limit, tracked {:.1}GB, reserve {:.1}GB)",
-            plan.hard_memory_limit_bytes as f64 / GIB as f64,
-            budget.limit_bytes() as f64 / GIB as f64,
-            plan.untracked_reserve_bytes as f64 / GIB as f64,
-        );
         eprintln!(
             "[kite count][auto] input={:.2}GB, read_len={:.1}bp from {} reads, E={}",
             plan.input_bytes as f64 / GIB as f64,
@@ -351,8 +333,9 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
             plan.decomp_budget_bytes as f64 / MIB as f64,
         );
         eprintln!(
-            "[kite count][auto] sampled_bytes={:.1}MB, reserved={:.1}MB, writer_lanes={}",
-            plan.sampled_bytes as f64 / MIB as f64,
+            "[kite count][auto] sampled_input={:.1}MB, sampled_decomp={:.1}MB, reserved={:.1}MB, writer_lanes={}",
+            plan.sampled_input_bytes as f64 / MIB as f64,
+            plan.sampled_decomp_bytes as f64 / MIB as f64,
             plan.reserved_bytes as f64 / MIB as f64,
             writer_lanes,
         );
@@ -406,7 +389,7 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
                     }
                     let _ = decomp_bytes;
                 }
-                Err(e) => eprintln!("[BGZF decomp error] {}", e),
+                Err(e) => eprintln!("[kite count] bgzf_decompress_error: {}", e),
             }
         }
         CompressionType::Gzip => {
@@ -429,7 +412,7 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        eprintln!("decompress error: {}", e);
+                        eprintln!("[kite count] decompress_error: {}", e);
                         break;
                     }
                 }
@@ -451,7 +434,7 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        eprintln!("read error: {}", e);
+                        eprintln!("[kite count] read_error: {}", e);
                         break;
                     }
                 }
@@ -503,7 +486,6 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     let finalize_summary = Arc::into_inner(kite_writer)
         .ok_or_else(|| anyhow::anyhow!("count writer still has outstanding references"))?
         .finalize()?;
-    let finalize_secs = t_finalize.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
     stats.set_partition_segment_distribution(
         finalize_summary.hottest_partition_segments,
         finalize_summary.least_partition_segments,
@@ -517,31 +499,30 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     if let Some((running, handle)) = progress_handle {
         running.store(false, Ordering::Relaxed);
         let _ = handle.join();
-        clear_progress_lines(2);
     }
 
     if args.test_mode {
         let kite_size = std::fs::metadata(&output_path)
             .map(|m| m.len())
             .unwrap_or(0);
-        eprintln!(
-            "[kite count] finalize:    {:.3}s ({:.1} GB written, {:.1} GB data area, {} chunks, {} rows)",
-            finalize_secs,
-            kite_size as f64 / 1e9,
-            finalize_summary.data_end as f64 / 1e9,
+        stats.print_report(
+            args,
+            n_threads,
+            partitions,
+            kite_size,
+            finalize_summary.data_end,
             finalize_summary.total_chunks,
             finalize_summary.total_rows,
-        );
-        stats.print_report(args, n_threads, partitions, wall);
-    } else {
-        eprintln!(
-            "[kite count] done in {:.3}s  ({} threads, {} decomp, {} workers)",
-            wall.as_secs_f64(),
-            n_threads,
-            decomp_threads,
-            worker_threads
+            wall,
         );
     }
+    eprintln!(
+        "[kite count] done in {:.3}s ({}, {} chunks, {} rows)",
+        wall.as_secs_f64(),
+        output_path,
+        finalize_summary.total_chunks,
+        finalize_summary.total_rows,
+    );
 
     Ok(())
 }
@@ -557,7 +538,7 @@ fn derive_heuristic_plan(
     let input_bytes = std::fs::metadata(&args.input).map(|m| m.len()).unwrap_or(0);
     let sample = sample_input(Path::new(&args.input), compression)?;
     let encoding_factor = encoding_factor_for(key_width);
-    let target_partition_bytes = target_partition_bytes_for(args.mode, args.k, key_width);
+    let target_partition_bytes = target_partition_bytes_for(args.k, key_width);
     let min_worker_budget = GIB / 2;
     let mut reasons = Vec::new();
 
@@ -646,12 +627,9 @@ fn derive_heuristic_plan(
         derived
     };
 
-    let requested_staging_mb = args.buffer.clamp(4, args.mode.target_staging_cap_mb());
-    let mut staging_candidates_mb = vec![16usize, 8, 4];
+    let requested_staging_mb = args.buffer.max(4);
+    let mut staging_candidates_mb = vec![requested_staging_mb, 16usize, 8, 4];
     staging_candidates_mb.retain(|value| *value <= requested_staging_mb);
-    if staging_candidates_mb.is_empty() {
-        staging_candidates_mb.push(requested_staging_mb);
-    }
     staging_candidates_mb.sort_unstable_by(|left, right| right.cmp(left));
     staging_candidates_mb.dedup();
 
@@ -670,7 +648,6 @@ fn derive_heuristic_plan(
             .checked_div(worker_threads.max(1))
             .unwrap_or(0);
         let local_flush_bytes = streaming_flush_target_bytes(
-            args.mode,
             args.k,
             key_width,
             chunk_size_bytes,
@@ -699,7 +676,8 @@ fn derive_heuristic_plan(
                 input_bytes,
                 avg_read_len: sample.avg_read_len,
                 sampled_reads: sample.sampled_reads,
-                sampled_bytes: sample.sampled_bytes,
+                sampled_input_bytes: sample.sampled_input_bytes,
+                sampled_decomp_bytes: sample.sampled_decomp_bytes,
                 partitions,
                 staging_bytes,
                 decomp_threads,
@@ -766,65 +744,50 @@ fn estimate_untracked_reserve_bytes(
         .min(hard_limit_bytes / 3)
 }
 
-fn target_partition_bytes_for(mode: crate::cli::CountMode, k: u8, key_width: u16) -> usize {
-    let base_mb: usize = match (key_width, mode) {
-        (KEY_WIDTH_U64, crate::cli::CountMode::Fast) => 640,
-        (KEY_WIDTH_U64, crate::cli::CountMode::Balanced) => 512,
-        (KEY_WIDTH_U64, crate::cli::CountMode::Compact) => 448,
-        (KEY_WIDTH_U128, crate::cli::CountMode::Fast) => 448,
-        (KEY_WIDTH_U128, crate::cli::CountMode::Balanced) => 384,
-        (KEY_WIDTH_U128, crate::cli::CountMode::Compact) => 320,
-        (_, crate::cli::CountMode::Fast) => 320,
-        (_, crate::cli::CountMode::Balanced) => 256,
-        (_, crate::cli::CountMode::Compact) => 224,
+fn codec_policy_label(entry_size: usize, zstd_level: i32) -> &'static str {
+    match (entry_size, zstd_level > 0) {
+        (36, false) => "raw-u256",
+        (36, true) => "raw-u256+zstd-if-smaller",
+        (_, false) => "dvle-only",
+        (_, true) => "dvle+zstd-if-smaller",
+    }
+}
+
+fn target_partition_bytes_for(k: u8, key_width: u16) -> usize {
+    let base_mb: usize = match key_width {
+        KEY_WIDTH_U64 => 640,
+        KEY_WIDTH_U128 => 448,
+        _ => 320,
     };
-    let adjusted_mb = match (key_width, mode, k) {
-        (KEY_WIDTH_U64, crate::cli::CountMode::Fast, 22..=31) => 192,
-        (KEY_WIDTH_U64, crate::cli::CountMode::Balanced, 22..=31) => 224,
-        (KEY_WIDTH_U64, crate::cli::CountMode::Compact, 22..=31) => 256,
-        (_, _, 0..=21) => base_mb + 64,
-        (_, _, 52..=u8::MAX) => base_mb.saturating_sub(64),
+    let adjusted_mb = match (key_width, k) {
+        (KEY_WIDTH_U64, 22..=31) => 192,
+        (_, 0..=21) => base_mb + 64,
+        (_, 52..=u8::MAX) => base_mb.saturating_sub(64),
         _ => base_mb,
     };
     adjusted_mb * MIB
 }
 
 fn streaming_flush_target_bytes(
-    mode: crate::cli::CountMode,
-    k: u8,
-    key_width: u16,
+    _k: u8,
+    _key_width: u16,
     chunk_size_bytes: usize,
     staging_bytes: usize,
     worker_budget_bytes: usize,
 ) -> usize {
-    let mode_cap_mb = match (key_width, mode) {
-        (KEY_WIDTH_U64, crate::cli::CountMode::Fast) => 192,
-        (KEY_WIDTH_U64, crate::cli::CountMode::Balanced) => 144,
-        (KEY_WIDTH_U64, crate::cli::CountMode::Compact) => 112,
-        (KEY_WIDTH_U128, crate::cli::CountMode::Fast) => 256,
-        (KEY_WIDTH_U128, crate::cli::CountMode::Balanced) => 192,
-        (KEY_WIDTH_U128, crate::cli::CountMode::Compact) => 144,
-        (_, crate::cli::CountMode::Fast) => 320,
-        (_, crate::cli::CountMode::Balanced) => 256,
-        (_, crate::cli::CountMode::Compact) => 192,
-    };
-    let path_bias_bytes = if k <= 21 {
-        32 * MIB
-    } else if k <= 31 {
-        16 * MIB
-    } else {
-        0
-    };
-    let baseline = chunk_size_bytes
+    let minimum = chunk_size_bytes
         .saturating_mul(2)
-        .max(staging_bytes.saturating_mul(4))
-        .max(mode_cap_mb * MIB)
-        .saturating_add(path_bias_bytes);
-    baseline.min(worker_budget_bytes)
+        .max(staging_bytes.saturating_mul(4));
+    let target = worker_budget_bytes.saturating_mul(45) / 100;
+    target.max(minimum)
 }
 
 fn encoding_factor_for(key_width: u16) -> usize {
-    if key_width == KEY_WIDTH_U64 { 1 } else { 2 }
+    if key_width == KEY_WIDTH_U64 {
+        1
+    } else {
+        2
+    }
 }
 
 fn derive_partition_count(
@@ -849,38 +812,50 @@ fn estimated_partitionable_bytes(
 
 fn sample_input(path: &Path, compression: CompressionType) -> anyhow::Result<InputSample> {
     let file = open_input(path)?;
-    let buffered = std::io::BufReader::with_capacity(2 * MIB, file);
 
     let mut sampled_reads = 0u64;
     let mut sampled_bases = 0u64;
-    let mut sampled_bytes = 0usize;
+    let mut sampled_decomp_bytes = 0usize;
+    let mut sampled_input_bytes = 0u64;
 
     match compression {
         CompressionType::Plain => {
+            let buffered = std::io::BufReader::with_capacity(2 * MIB, file);
             let mut reader = PlainChunkedReader::new(buffered, SAMPLE_CHUNK_BYTES);
-            while sampled_reads < SAMPLE_MAX_READS && sampled_bytes < SAMPLE_MAX_BYTES {
+            while sampled_reads < SAMPLE_MAX_READS && sampled_decomp_bytes < SAMPLE_MAX_BYTES {
                 let Some(chunk) = reader.next_chunk()? else {
                     break;
                 };
-                sampled_bytes = sampled_bytes.saturating_add(chunk.len());
+                sampled_decomp_bytes = sampled_decomp_bytes.saturating_add(chunk.len());
+                sampled_input_bytes = sampled_decomp_bytes as u64;
                 let _ = parse_sequences(&chunk, |seq| {
                     sampled_reads += 1;
                     sampled_bases += seq.len() as u64;
                 });
             }
         }
-        CompressionType::Gzip | CompressionType::Bgzf => {
-            let mut reader = GzipChunkedReader::new(buffered, SAMPLE_CHUNK_BYTES);
-            while sampled_reads < SAMPLE_MAX_READS && sampled_bytes < SAMPLE_MAX_BYTES {
+        CompressionType::Gzip => {
+            let bytes_read = Arc::new(AtomicU64::new(0));
+            let counting = CountingReader::new(file, Arc::clone(&bytes_read));
+            let mut reader = GzipChunkedReader::new(counting, SAMPLE_CHUNK_BYTES);
+            while sampled_reads < SAMPLE_MAX_READS && sampled_decomp_bytes < SAMPLE_MAX_BYTES {
                 let Some(chunk) = reader.next_chunk()? else {
                     break;
                 };
-                sampled_bytes = sampled_bytes.saturating_add(chunk.len());
+                sampled_decomp_bytes = sampled_decomp_bytes.saturating_add(chunk.len());
+                sampled_input_bytes = bytes_read.load(Ordering::Relaxed);
                 let _ = parse_sequences(&chunk, |seq| {
                     sampled_reads += 1;
                     sampled_bases += seq.len() as u64;
                 });
             }
+        }
+        CompressionType::Bgzf => {
+            let (reads, bases, input_bytes, decomp_bytes) = sample_bgzf_input(path)?;
+            sampled_reads = reads;
+            sampled_bases = bases;
+            sampled_input_bytes = input_bytes;
+            sampled_decomp_bytes = decomp_bytes;
         }
     }
 
@@ -893,8 +868,75 @@ fn sample_input(path: &Path, compression: CompressionType) -> anyhow::Result<Inp
     Ok(InputSample {
         avg_read_len,
         sampled_reads,
-        sampled_bytes,
+        sampled_input_bytes,
+        sampled_decomp_bytes,
     })
+}
+
+fn sample_bgzf_input(path: &Path) -> anyhow::Result<(u64, u64, u64, usize)> {
+    let file = std::fs::File::open(path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let blocks = scan_bgzf_blocks(&mmap)?;
+
+    let mut sampled_reads = 0u64;
+    let mut sampled_bases = 0u64;
+    let mut sampled_input_bytes = 0u64;
+    let mut sampled_decomp_bytes = 0usize;
+    let mut carry = Vec::with_capacity(SAMPLE_CHUNK_BYTES + 8192);
+
+    for (offset, size) in blocks {
+        let raw = &mmap[offset..offset + size];
+        let mut out = Vec::with_capacity(65536);
+        GzDecoder::new(raw).read_to_end(&mut out)?;
+
+        sampled_input_bytes = sampled_input_bytes.saturating_add(size as u64);
+        sampled_decomp_bytes = sampled_decomp_bytes.saturating_add(out.len());
+        carry.extend_from_slice(&out);
+
+        let split = find_fastq_split_4lines(&carry);
+        if split > 0 {
+            let complete = &carry[..split];
+            let _ = parse_sequences(complete, |seq| {
+                sampled_reads += 1;
+                sampled_bases += seq.len() as u64;
+            });
+            let leftover = carry.len() - split;
+            if leftover > 0 {
+                carry.copy_within(split.., 0);
+            }
+            carry.truncate(leftover);
+        }
+
+        if sampled_reads >= SAMPLE_MAX_READS || sampled_decomp_bytes >= SAMPLE_MAX_BYTES {
+            break;
+        }
+    }
+
+    Ok((
+        sampled_reads,
+        sampled_bases,
+        sampled_input_bytes,
+        sampled_decomp_bytes,
+    ))
+}
+
+struct CountingReader<R> {
+    inner: R,
+    bytes_read: Arc<AtomicU64>,
+}
+
+impl<R> CountingReader<R> {
+    fn new(inner: R, bytes_read: Arc<AtomicU64>) -> Self {
+        Self { inner, bytes_read }
+    }
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.bytes_read.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
 }
 
 fn round_up_power_of_two(value: usize) -> usize {
