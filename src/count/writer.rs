@@ -1,10 +1,10 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 
-use crossbeam_channel::{Sender, bounded};
+use crossbeam_channel::{bounded, Sender};
 
 use crate::count::memory::SharedBudget;
 use crate::format::{ChunkIndexEntry, KiteHeader, Kx2Footer, PartitionEntry};
@@ -58,6 +58,8 @@ pub struct ConcurrentKiteWriter {
     partitions: usize,
     key_width: u16,
     codec_mask: u16,
+    min_count: Option<u32>,
+    max_count: Option<u32>,
     staging_bytes: usize,
     staged_high_watermark: usize,
     staged_low_watermark: usize,
@@ -80,9 +82,12 @@ impl ConcurrentKiteWriter {
         codec_mask: u16,
         staging_bytes: usize,
         write_lane_count: usize,
+        min_count: Option<u32>,
+        max_count: Option<u32>,
     ) -> io::Result<Self> {
         let mut file = File::create(output_path)?;
-        let header = KiteHeader::new(k, canonical, partitions as u32, key_width, codec_mask);
+        let header = KiteHeader::new(k, canonical, partitions as u32, key_width, codec_mask)
+            .with_count_filters(min_count, max_count);
         let mut header_buf = vec![0u8; KiteHeader::SIZE];
         {
             let mut cursor = std::io::Cursor::new(&mut header_buf[..]);
@@ -122,6 +127,8 @@ impl ConcurrentKiteWriter {
             partitions,
             key_width,
             codec_mask,
+            min_count,
+            max_count,
             staging_bytes,
             staged_high_watermark: high_watermark,
             staged_low_watermark: low_watermark,
@@ -201,7 +208,11 @@ impl ConcurrentKiteWriter {
         }
 
         let flush_len = staging.buffer.len();
-        let data = std::mem::take(&mut staging.buffer);
+        let replacement_capacity = staging.buffer.capacity().max(self.staging_bytes);
+        let data = std::mem::replace(
+            &mut staging.buffer,
+            Vec::with_capacity(replacement_capacity),
+        );
         let offset = self.claim_offset_and_enqueue(data)?;
 
         self.staged_bytes.fetch_sub(flush_len, Ordering::Relaxed);
@@ -452,13 +463,14 @@ impl ConcurrentKiteWriter {
                 footer_offset,
                 total_chunks,
                 total_rows,
+                min_count: self.min_count,
+                max_count: self.max_count,
             }
             .write_to(&mut cursor)?;
         }
         raw_file.seek(SeekFrom::Start(0))?;
         raw_file.write_all(&header_buf)?;
         raw_file.set_len(total_size)?;
-        raw_file.sync_all()?;
 
         Ok(FinalizeSummary {
             total_chunks,

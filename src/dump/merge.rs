@@ -7,6 +7,7 @@ use crate::dump::decoder::{decode_kmer_any, decode_kmer_u256, format_tsv_line};
 use crate::dump::loser_tree::LoserTreeMerger;
 use crate::dump::reader::{ChunkLocation, KiteReader};
 use crate::dump::writer::SlabPool;
+use crate::kiteops::count_passes_filter;
 use crate::stats::DumpStats;
 
 struct MmapRunIter {
@@ -287,6 +288,8 @@ pub fn stream_partition_slabs<F>(
     slab_pool: &SlabPool,
     collect_timing: bool,
     stats: &Arc<DumpStats>,
+    min_count: Option<u32>,
+    max_count: Option<u32>,
     mut emit: F,
 ) -> std::io::Result<()>
 where
@@ -341,6 +344,10 @@ where
                 acc = acc.saturating_add(all[j].2);
                 j += 1;
             }
+            if !count_passes_filter(acc as u64, min_count, max_count) {
+                i = j;
+                continue;
+            }
             if !slab.is_empty() && slab.capacity().saturating_sub(slab.len()) < line_reserve {
                 let next_slab = slab_pool.acquire();
                 emit(std::mem::replace(&mut slab, next_slab), slab_rows)?;
@@ -382,6 +389,9 @@ where
             let Some((key, count)) = next else {
                 break;
             };
+            if !count_passes_filter(count as u64, min_count, max_count) {
+                continue;
+            }
 
             let t_format = collect_timing.then(Instant::now);
             if !slab.is_empty() && slab.capacity().saturating_sub(slab.len()) < line_reserve {

@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io;
 
-use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
 use crate::format::{ChunkIndexEntry, KiteHeader, Kx2Footer, PartitionEntry};
+use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
 
 /// Per-chunk location in the .kite data area.
 #[derive(Debug, Clone)]
@@ -14,14 +14,6 @@ pub struct ChunkLocation {
     pub raw_bytes: u64,
     pub codec: u32,
     pub row_count: u64,
-    #[allow(dead_code)]
-    pub key_min_lo: u128,
-    #[allow(dead_code)]
-    pub key_min_hi: u128,
-    #[allow(dead_code)]
-    pub key_max_lo: u128,
-    #[allow(dead_code)]
-    pub key_max_hi: u128,
 }
 
 impl ChunkLocation {
@@ -30,7 +22,6 @@ impl ChunkLocation {
         self.codec & CODEC_ZSTD != 0
     }
 
-    #[allow(dead_code)]
     #[inline]
     pub fn is_dvle(&self) -> bool {
         self.codec & CODEC_DVLE != 0
@@ -46,14 +37,11 @@ pub struct KiteReader {
     /// Per-partition chunk locations, indexed by partition_id.
     pub partition_chunks: Vec<Vec<ChunkLocation>>,
     pub total_chunks: u64,
-    #[allow(dead_code)]
-    file_size: u64,
 }
 
 impl KiteReader {
     pub fn open(path: &str) -> io::Result<Self> {
         let file = File::open(path)?;
-        let file_size = file.metadata()?.len();
         let mmap = unsafe { Mmap::map(&file)? };
 
         if mmap.len() < KiteHeader::SIZE + Kx2Footer::SIZE {
@@ -150,10 +138,6 @@ impl KiteReader {
                     raw_bytes: e.raw_bytes,
                     codec: e.codec,
                     row_count: e.row_count,
-                    key_min_lo: e.key_min_lo,
-                    key_min_hi: e.key_min_hi,
-                    key_max_lo: e.key_max_lo,
-                    key_max_hi: e.key_max_hi,
                 });
             }
             partition_chunks[b] = chunks;
@@ -166,7 +150,6 @@ impl KiteReader {
             chunk_entries,
             partition_chunks,
             total_chunks,
-            file_size,
         })
     }
 

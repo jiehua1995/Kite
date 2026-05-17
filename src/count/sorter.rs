@@ -1,11 +1,3 @@
-/// Radix sort for u64 slices.
-/// 8-pass (one byte per pass), 256 buckets per pass.
-/// Falls back to std::sort_unstable for tiny inputs.
-#[allow(dead_code)]
-pub fn radix_sort_u64(buf: &mut Vec<u64>) {
-    radix_sort_u64_passes(buf, 8);
-}
-
 // ─── Thread-local scratch buffers ────────────────────────────────────────────
 // Each worker thread allocates one scratch buffer per type.  The buffer grows
 // lazily to the maximum sort size seen on that thread and is NEVER freed.
@@ -19,7 +11,7 @@ thread_local! {
     static SCRATCH_U256: UnsafeCell<Vec<crate::count::kmer::KmerU256>> = UnsafeCell::new(Vec::new());
 }
 
-/// Ensure the thread-local scratch Vec<u64> has at least `n` elements of
+/// Ensure the thread-local scratch `Vec<u64>` has at least `n` elements of
 /// capacity, without zeroing (safe because radix sort writes before it reads).
 #[inline(always)]
 fn scratch_u64(n: usize) -> &'static mut [u64] {
@@ -512,7 +504,7 @@ fn byte_of_u256(v: &crate::count::kmer::KmerU256, byte: usize) -> usize {
 /// RLE compress a sorted slice of raw u64 k-mer values.
 /// Returns a Vec of (key, count) pairs where count is accumulated duplicates.
 /// count is capped at u32::MAX; overflow silently saturates.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn rle_compress(sorted: &[u64], out: &mut Vec<(u64, u32)>) {
     rle_compress_typed(sorted, out);
 }
@@ -535,36 +527,6 @@ pub fn rle_compress_typed<T: Eq + Copy>(sorted: &[T], out: &mut Vec<(T, u32)>) {
         }
     }
     out.push((cur, cnt));
-}
-
-/// RLE merge: merge a new (key,count) run buffer into an existing RLE buffer.
-/// Both are assumed sorted by key. Used when merging worker runs.
-#[allow(dead_code)]
-pub fn rle_merge_sorted(a: &[(u64, u32)], b: &[(u64, u32)], out: &mut Vec<(u64, u32)>) {
-    let (mut i, mut j) = (0, 0);
-    while i < a.len() && j < b.len() {
-        let (ak, ac) = a[i];
-        let (bk, bc) = b[j];
-        if ak < bk {
-            out.push((ak, ac));
-            i += 1;
-        } else if bk < ak {
-            out.push((bk, bc));
-            j += 1;
-        } else {
-            out.push((ak, ac.saturating_add(bc)));
-            i += 1;
-            j += 1;
-        }
-    }
-    while i < a.len() {
-        out.push(a[i]);
-        i += 1;
-    }
-    while j < b.len() {
-        out.push(b[j]);
-        j += 1;
-    }
 }
 
 #[cfg(test)]

@@ -18,12 +18,6 @@ impl std::fmt::Display for CompressionType {
     }
 }
 
-/// BGZF block header magic bytes at offset 0 of each block.
-/// A BGZF file starts with a gzip block whose extra field contains the BGZF
-/// extra subfield with ID1=66 ('B'), ID2=67 ('C').
-#[allow(dead_code)]
-const BGZF_MAGIC: &[u8] = &[0x1f, 0x8b, 0x08, 0x04]; // gzip + FLG=FEXTRA
-
 /// Detect compression type by reading first few bytes of the file.
 pub fn detect_compression(path: &Path) -> std::io::Result<CompressionType> {
     use std::fs::File;

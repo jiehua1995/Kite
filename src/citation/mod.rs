@@ -7,6 +7,10 @@ use crate::stats::print_simple_test_report;
 
 pub fn run_citation(args: &CitationArgs) -> anyhow::Result<()> {
     let started = Instant::now();
+    eprintln!(
+        "[kite citation] format={:?}, output={}",
+        args.format, args.output
+    );
     let mut out = create_output_writer(&args.output)?;
     match args.format {
         CitationFormat::Text => {
@@ -58,5 +62,9 @@ pub fn run_citation(args: &CitationArgs) -> anyhow::Result<()> {
             started.elapsed(),
         );
     }
+    eprintln!(
+        "[kite citation] done in {:.3}s",
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }

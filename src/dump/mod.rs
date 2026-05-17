@@ -5,19 +5,20 @@ pub mod reader;
 pub mod writer;
 
 use std::fs::File;
-use std::io::{BufWriter, IsTerminal, Write};
-use std::sync::Arc;
+use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::bounded;
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
 use crate::cli::DumpArgs;
 use crate::dump::merge::stream_partition_slabs;
 use crate::dump::reader::KiteReader;
-use crate::dump::writer::{DUMP_QUEUE_BYTES, DUMP_SLAB_BYTES, SlabPool, queue_slots_for};
+use crate::dump::writer::{queue_slots_for, SlabPool, DUMP_QUEUE_BYTES, DUMP_SLAB_BYTES};
 use crate::stats::DumpStats;
 
 fn spawn_dump_progress(
@@ -37,16 +38,20 @@ fn spawn_dump_progress(
     Some((
         running,
         thread::spawn(move || {
-            let is_tty = std::io::stderr().is_terminal();
-            let mut rendered = false;
-            let mut last_fallback = Instant::now() - Duration::from_secs(60);
-            let total_header = format!(
-                "[kite dump] total partitions={} chunks={} rows={} workers={} writers=1",
-                total_partitions,
+            let initial_total = (total_partitions as u64).max(1);
+            let bar = ProgressBar::new(initial_total);
+            let style = ProgressStyle::with_template(
+                "{spinner:.green} {msg}\n[{bar:40.cyan/blue}] {percent:>3}% | {pos}/{len} partitions | eta {eta_precise}",
+            )
+            .unwrap_or_else(|_| ProgressStyle::default_bar());
+            bar.set_style(style.progress_chars("=>-"));
+            bar.enable_steady_tick(Duration::from_millis(120));
+            bar.set_message(format!(
+                "dump workers={} writers=1 | chunks {} | output_rows 0 | input_rows {} | written 0B | elapsed 00:00",
+                worker_threads,
                 total_chunks,
                 fmt_num_compact(total_rows),
-                worker_threads,
-            );
+            ));
             while running_flag.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(250));
                 if !running_flag.load(Ordering::Relaxed) {
@@ -56,60 +61,22 @@ fn spawn_dump_progress(
                 let done = stats.partitions_processed.load(Ordering::Relaxed);
                 let rows = stats.total_rows.load(Ordering::Relaxed);
                 let written = stats.bytes_written.load(Ordering::Relaxed);
-                let progress = if total_rows > 0 {
-                    (rows as f64 / total_rows as f64).clamp(0.0, 0.999)
-                } else if total_partitions > 0 {
-                    (done as f64 / total_partitions as f64).clamp(0.0, 0.999)
-                } else {
-                    0.0
-                };
-                let eta = if progress > 0.001 {
-                    Some(Duration::from_secs_f64(wall * (1.0 - progress) / progress))
-                } else {
-                    None
-                };
-                let detail = format!(
-                    "[kite dump] done partitions={}/{} rows={}/{} ({:5.1}%) written={} elapsed={} eta={}",
-                    done,
-                    total_partitions,
+                let total_units = (total_partitions as u64).max(done).max(1);
+                bar.set_length(total_units);
+                bar.set_position(done.min(total_units));
+                bar.set_message(format!(
+                    "dump workers={} writers=1 | chunks {} | output_rows {} | input_rows {} | written {} | elapsed {}",
+                    worker_threads,
+                    total_chunks,
                     fmt_num_compact(rows),
                     fmt_num_compact(total_rows),
-                    progress * 100.0,
                     fmt_bytes_compact(written),
                     fmt_duration_compact(Duration::from_secs_f64(wall)),
-                    fmt_eta_compact(eta),
-                );
-                if is_tty {
-                    let mut stderr = std::io::stderr().lock();
-                    if rendered {
-                        let _ = write!(stderr, "\x1b[2F");
-                    }
-                    let _ = write!(stderr, "\x1b[2K{}\n\x1b[2K{}\n", total_header, detail);
-                    let _ = stderr.flush();
-                    rendered = true;
-                } else if last_fallback.elapsed() >= Duration::from_secs(15) {
-                    eprintln!("{} | {}", total_header, detail);
-                    last_fallback = Instant::now();
-                }
+                ));
             }
+            bar.finish_and_clear();
         }),
     ))
-}
-
-fn clear_progress_lines(line_count: usize) {
-    if !std::io::stderr().is_terminal() || line_count == 0 {
-        return;
-    }
-    let mut stderr = std::io::stderr().lock();
-    let _ = write!(stderr, "\x1b[{}F", line_count);
-    for index in 0..line_count {
-        let _ = write!(stderr, "\x1b[2K");
-        if index + 1 < line_count {
-            let _ = write!(stderr, "\n");
-        }
-    }
-    let _ = write!(stderr, "\r");
-    let _ = stderr.flush();
 }
 
 fn fmt_num_compact(value: u64) -> String {
@@ -148,11 +115,6 @@ fn fmt_duration_compact(duration: Duration) -> String {
     }
 }
 
-fn fmt_eta_compact(eta: Option<Duration>) -> String {
-    eta.map(fmt_duration_compact)
-        .unwrap_or_else(|| "--:--".to_string())
-}
-
 pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     let n_threads = if args.threads == 0 {
         num_cpus::get()
@@ -176,6 +138,8 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
         .iter()
         .map(|chunk| chunk.row_count)
         .sum();
+    let min_count = reader.header.min_count;
+    let max_count = reader.header.max_count;
 
     let chunk_counts: Vec<u64> = reader
         .partition_entries
@@ -199,6 +163,33 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     stats.set_partition_distribution(hottest, coldest, p99_chunk_bytes);
 
     let worker_count = n_threads.clamp(1, n_partitions.max(1));
+    let channel_depth = worker_count.saturating_mul(2).max(4);
+    eprintln!("[kite dump] opening: {}", args.input);
+    eprintln!("[kite dump] output:  {}", args.output);
+    eprintln!(
+        "[kite dump] k={}, partitions={}, total_chunks={}",
+        k, n_partitions, total_chunks
+    );
+    eprintln!(
+        "[kite dump] header filters min={}, max={}",
+        min_count
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        max_count
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+    );
+    eprintln!(
+        "[kite dump] slab_bytes={}, workers={}, channel_depth={}, mode={}",
+        slab_bytes,
+        worker_count,
+        channel_depth,
+        if args.output == "-" {
+            "stdout"
+        } else {
+            "async-writer"
+        },
+    );
     let progress_handle = spawn_dump_progress(
         args.progress,
         Arc::clone(&stats),
@@ -234,6 +225,8 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
                 &slab_pool,
                 collect_timing,
                 &stats,
+                min_count,
+                max_count,
                 |bytes, rows| {
                     out.write_all(&bytes)?;
                     stats.add_rows(rows);
@@ -248,13 +241,11 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
         if let Some((running, handle)) = progress_handle {
             running.store(false, Ordering::Relaxed);
             let _ = handle.join();
-            clear_progress_lines(2);
         }
         if args.test_mode {
             stats.print_report(args, n_threads, total_chunks, n_partitions, wall);
-        } else {
-            eprintln!("[kite dump] done in {:.3}s", wall.as_secs_f64());
         }
+        eprintln!("[kite dump] done in {:.3}s", wall.as_secs_f64());
         return Ok(());
     }
 
@@ -269,7 +260,6 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     //   - After the writer thread writes a slab it returns it to the slab pool.
     // Channel depth: worker_count × 2 (≤ worker_count × 2 × 64 MiB in flight).
     let out_file = File::create(&output_path)?;
-    let channel_depth = worker_count.saturating_mul(2).max(4);
     let (slab_tx, slab_rx) = bounded::<Vec<u8>>(channel_depth);
     let slab_pool_writer = Arc::clone(&slab_pool);
     let writer_handle = thread::spawn(move || -> std::io::Result<()> {
@@ -280,18 +270,6 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
         }
         writer.flush()
     });
-
-    if args.test_mode {
-        eprintln!("[kite dump] opening: {}", args.input);
-        eprintln!(
-            "[kite dump] k={}, partitions={}, total_chunks={}",
-            k, n_partitions, total_chunks
-        );
-        eprintln!(
-            "[kite dump] slab_bytes={}, workers={}, channel_depth={}, mode=async-writer",
-            slab_bytes, worker_count, channel_depth,
-        );
-    }
 
     let stats_work = Arc::clone(&stats);
     let reader_work = Arc::clone(&reader);
@@ -315,6 +293,8 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
                     &slab_pool,
                     collect_timing,
                     &stats_work,
+                    min_count,
+                    max_count,
                     |bytes, rows| {
                         let written = bytes.len() as u64;
                         tx.send(bytes).map_err(|_| {
@@ -353,12 +333,10 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     if let Some((running, handle)) = progress_handle {
         running.store(false, Ordering::Relaxed);
         let _ = handle.join();
-        clear_progress_lines(2);
     }
     if args.test_mode {
         stats.print_report(args, n_threads, total_chunks, n_partitions, wall);
-    } else {
-        eprintln!("[kite dump] done in {:.3}s", wall.as_secs_f64());
     }
+    eprintln!("[kite dump] done in {:.3}s", wall.as_secs_f64());
     Ok(())
 }
