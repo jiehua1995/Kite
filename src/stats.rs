@@ -126,6 +126,18 @@ impl CountStats {
                     ("input", args.input.clone()),
                     ("k", args.k.to_string()),
                     ("canonical", args.canonical.to_string()),
+                    (
+                        "min",
+                        args.min
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                    ),
+                    (
+                        "max",
+                        args.max
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                    ),
                     ("threads", actual_threads.to_string()),
                     ("partitions", actual_partitions.to_string()),
                     ("chunk_kmers", args.chunk_kmers.to_string()),

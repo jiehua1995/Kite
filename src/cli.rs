@@ -31,7 +31,11 @@ pub enum CitationFormat {
 pub enum CorrelationMode {
     All,
     Pearson,
+    Spearman,
     Cosine,
+    Euclidean,
+    Manhattan,
+    Mahalanobis,
 }
 
 // Embedding
@@ -41,6 +45,8 @@ pub enum EmbeddingMode {
     Pca,
     Tsne,
     Umap,
+    #[value(alias = "pcamap")]
+    Pacmap,
 }
 
 #[derive(Parser, Debug)]
@@ -133,6 +139,14 @@ pub struct CountArgs {
     #[arg(long = "canonical", action = ArgAction::Set, default_value_t = false, value_name = "BOOL", help_heading = "k-mer")]
     pub canonical: bool,
 
+    /// Store a header marker that downstream commands use to hide counts below this value.
+    #[arg(long = "min", value_name = "N", help_heading = "k-mer")]
+    pub min: Option<u32>,
+
+    /// Store a header marker that downstream commands use to hide counts above this value.
+    #[arg(long = "max", value_name = "N", help_heading = "k-mer")]
+    pub max: Option<u32>,
+
     /// Output compression mode: fast=DVLE/raw only, balanced=DVLE/raw plus zstd level 2 when smaller, compact=DVLE/raw plus zstd level 5 when smaller. Default: fast.
     #[arg(long = "mode", value_enum, default_value_t = CountMode::Fast, value_name = "MODE", help_heading = "Performance")]
     pub mode: CountMode,
@@ -169,10 +183,10 @@ pub struct CountArgs {
     #[arg(long = "memory", value_name = "SIZE", help_heading = "Performance")]
     pub memory: Option<String>,
 
-    /// Staging buffer target in MB. Independent of --mode. Default: 16.
+    /// Staging buffer target in MB. Independent of --mode. Default: 32.
     #[arg(
         long = "buffer",
-        default_value_t = 16,
+        default_value_t = 32,
         value_name = "MB",
         help_heading = "Performance"
     )]
@@ -256,6 +270,22 @@ pub struct InfoArgs {
         help_heading = "Required"
     )]
     pub input: String,
+
+    /// Set the header minimum count marker used by downstream commands.
+    #[arg(long = "set-min", value_name = "N", help_heading = "Edit")]
+    pub set_min: Option<u32>,
+
+    /// Set the header maximum count marker used by downstream commands.
+    #[arg(long = "set-max", value_name = "N", help_heading = "Edit")]
+    pub set_max: Option<u32>,
+
+    /// Clear the header minimum count marker.
+    #[arg(long = "clear-min", default_value_t = false, help_heading = "Edit")]
+    pub clear_min: bool,
+
+    /// Clear the header maximum count marker.
+    #[arg(long = "clear-max", default_value_t = false, help_heading = "Edit")]
+    pub clear_max: bool,
 
     /// Run in test mode.
     #[arg(long = "test-mode", default_value_t = false, help_heading = "Behavior")]
@@ -446,11 +476,11 @@ pub struct AnalyzeArgs {
     pub top_variable_kmers: usize,
 
     /// Correlation mode for analysis.
-    #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::All, value_name = "MODE", help_heading = "Analysis")]
+    #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::Pearson, value_name = "MODE", help_heading = "Analysis")]
     pub correlation: CorrelationMode,
 
     /// Embedding mode for analysis.
-    #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::All, value_name = "MODE", help_heading = "Analysis")]
+    #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::Pca, value_name = "MODE", help_heading = "Analysis")]
     pub embedding: EmbeddingMode,
 
     /// Number of clusters for heatmap k-means.
@@ -564,6 +594,18 @@ pub struct FlyArgs {
     #[arg(long = "canonical", action = ArgAction::Set, default_value_t = false, value_name = "BOOL", help_heading = "k-mer")]
     pub canonical: bool,
 
+    /// Store a header marker that downstream commands use to hide counts below this value.
+    #[arg(long = "min", value_name = "N", help_heading = "k-mer")]
+    pub min: Option<u32>,
+
+    /// Store a header marker that downstream commands use to hide counts above this value.
+    #[arg(long = "max", value_name = "N", help_heading = "k-mer")]
+    pub max: Option<u32>,
+
+    /// Output compression mode used by the count stage.
+    #[arg(long = "mode", value_enum, default_value_t = CountMode::Fast, value_name = "MODE", help_heading = "Performance")]
+    pub mode: CountMode,
+
     /// Number of threads to use. Use 0 to auto-detect.
     #[arg(
         short = 't',
@@ -578,6 +620,33 @@ pub struct FlyArgs {
     #[arg(long = "memory", value_name = "SIZE", help_heading = "Performance")]
     pub memory: Option<String>,
 
+    /// Number of partitions for the count stage. Use 0 to auto-select.
+    #[arg(
+        long = "partitions",
+        default_value_t = 0,
+        value_name = "N",
+        help_heading = "Performance"
+    )]
+    pub partitions: usize,
+
+    /// Number of k-mers per count chunk.
+    #[arg(
+        long = "chunk-kmers",
+        default_value_t = 8_000_000,
+        value_name = "N",
+        help_heading = "Performance"
+    )]
+    pub chunk_kmers: usize,
+
+    /// Staging buffer target in MB for the count stage.
+    #[arg(
+        long = "buffer",
+        default_value_t = 32,
+        value_name = "MB",
+        help_heading = "Performance"
+    )]
+    pub buffer: usize,
+
     /// Number of top variable k-mers to analyze. Use 0 for all.
     #[arg(
         long = "top-variable-kmers",
@@ -588,11 +657,11 @@ pub struct FlyArgs {
     pub top_variable_kmers: usize,
 
     /// Correlation mode for analysis.
-    #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::All, value_name = "MODE", help_heading = "Analysis")]
+    #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::Pearson, value_name = "MODE", help_heading = "Analysis")]
     pub correlation: CorrelationMode,
 
     /// Embedding mode for analysis.
-    #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::All, value_name = "MODE", help_heading = "Analysis")]
+    #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::Pca, value_name = "MODE", help_heading = "Analysis")]
     pub embedding: EmbeddingMode,
 
     /// Number of clusters for heatmap k-means.

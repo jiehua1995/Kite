@@ -41,6 +41,45 @@ pub struct SerializedPartitionChunk {
     pub key_max_hi: u128,
 }
 
+pub fn count_passes_filter(count: u64, min_count: Option<u32>, max_count: Option<u32>) -> bool {
+    if let Some(min_count) = min_count {
+        if count < min_count as u64 {
+            return false;
+        }
+    }
+    if let Some(max_count) = max_count {
+        if count > max_count as u64 {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn format_count_filter(value: Option<u32>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+pub fn format_reader_filter(reader: &KiteReader) -> String {
+    format!(
+        "min={}, max={}",
+        format_count_filter(reader.header.min_count),
+        format_count_filter(reader.header.max_count)
+    )
+}
+
+pub fn count_passes_reader_filter(reader: &KiteReader, count: u64) -> bool {
+    count_passes_filter(count, reader.header.min_count, reader.header.max_count)
+}
+
+pub fn apply_reader_filter_to_rows(reader: &KiteReader, rows: &mut Vec<(KmerKey, u64)>) {
+    if reader.header.min_count.is_none() && reader.header.max_count.is_none() {
+        return;
+    }
+    rows.retain(|(_, count)| count_passes_reader_filter(reader, *count));
+}
+
 pub fn create_output_writer(path: &str) -> anyhow::Result<Box<dyn Write>> {
     if path == "-" {
         Ok(Box::new(BufWriter::new(std::io::stdout())))
@@ -581,4 +620,85 @@ pub fn serialize_partition_chunk(
         key_max_lo: last.lo,
         key_max_hi: last.hi,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::{CODEC_DVLE, CODEC_RAW};
+
+    fn key(lo: u128) -> KmerKey {
+        KmerKey { hi: 0, lo }
+    }
+
+    #[test]
+    fn count_filter_handles_open_and_closed_bounds() {
+        assert!(count_passes_filter(5, None, None));
+        assert!(!count_passes_filter(1, Some(2), None));
+        assert!(count_passes_filter(2, Some(2), None));
+        assert!(count_passes_filter(10, None, Some(10)));
+        assert!(!count_passes_filter(11, None, Some(10)));
+        assert!(count_passes_filter(5, Some(2), Some(10)));
+        assert!(!count_passes_filter(1, Some(2), Some(10)));
+        assert!(!count_passes_filter(11, Some(2), Some(10)));
+    }
+
+    #[test]
+    fn merge_vectors_total_sums_sorted_union() {
+        let vectors = vec![
+            vec![(key(1), 2), (key(3), 4)],
+            vec![(key(2), 5), (key(3), 6)],
+            vec![(key(1), 7), (key(4), 8)],
+        ];
+        let merged = merge_vectors_total(&vectors);
+        assert_eq!(
+            merged,
+            vec![(key(1), 9), (key(2), 5), (key(3), 10), (key(4), 8)]
+        );
+    }
+
+    #[test]
+    fn for_each_union_row_emits_zero_filled_rows() {
+        let vectors = vec![vec![(key(1), 2), (key(3), 4)], vec![(key(2), 5)]];
+        let mut rows = Vec::new();
+        for_each_union_row(&vectors, |key, row| {
+            rows.push((key.lo, row.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(1, vec![2, 0]), (2, vec![0, 5]), (3, vec![4, 0])]
+        );
+    }
+
+    #[test]
+    fn serialize_partition_chunk_uses_expected_codec_and_bounds() {
+        let rows = vec![(key(2), 3), (key(5), 7)];
+        let chunk = serialize_partition_chunk(&rows, KEY_WIDTH_U64)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunk.codec, CODEC_DVLE);
+        assert_eq!(chunk.row_count, 2);
+        assert_eq!(chunk.key_min_lo, 2);
+        assert_eq!(chunk.key_max_lo, 5);
+
+        let wide_rows = vec![
+            (
+                KmerKey {
+                    hi: 1,
+                    lo: u128::MAX - 1,
+                },
+                9,
+            ),
+            (KmerKey { hi: 2, lo: 1 }, 10),
+        ];
+        let wide = serialize_partition_chunk(&wide_rows, KEY_WIDTH_U256)
+            .unwrap()
+            .unwrap();
+        assert_eq!(wide.codec, CODEC_RAW);
+        assert_eq!(wide.raw_bytes, 72);
+        assert_eq!(wide.key_min_hi, 1);
+        assert_eq!(wide.key_max_hi, 2);
+    }
 }

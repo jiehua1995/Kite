@@ -3,42 +3,69 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::Instant;
 
+use anyhow::Context;
+use faer::Mat;
+use manifolds_rs::{pacmap, tsne, umap, PacmapParams, TsneParams, UmapParams};
+use nalgebra::{DMatrix, SymmetricEigen};
+
 use crate::cli::{AnalyzeArgs, CorrelationMode, EmbeddingMode};
 use crate::kiteops::{
-    ensure_compatible, for_each_union_row, infer_sample_labels, key_to_string,
-    load_partition_counts, open_readers, PartitionProgress,
+    apply_reader_filter_to_rows, ensure_compatible, for_each_union_row, format_reader_filter,
+    infer_sample_labels, key_to_string, load_partition_counts, open_readers, PartitionProgress,
 };
 use crate::stats::print_simple_test_report;
 
 const HEATMAP_PLOT_MAX_ROWS: u64 = 5000;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 enum CorrelationMethod {
     Pearson,
+    Spearman,
     Cosine,
+    Euclidean,
+    Manhattan,
+    Mahalanobis,
 }
 
 impl CorrelationMethod {
     fn slug(self) -> &'static str {
         match self {
             CorrelationMethod::Pearson => "pearson",
+            CorrelationMethod::Spearman => "spearman",
             CorrelationMethod::Cosine => "cosine",
+            CorrelationMethod::Euclidean => "euclidean",
+            CorrelationMethod::Manhattan => "manhattan",
+            CorrelationMethod::Mahalanobis => "mahalanobis",
         }
     }
 
     fn display_name(self) -> &'static str {
         match self {
             CorrelationMethod::Pearson => "Pearson",
+            CorrelationMethod::Spearman => "Spearman",
             CorrelationMethod::Cosine => "Cosine",
+            CorrelationMethod::Euclidean => "Euclidean distance",
+            CorrelationMethod::Manhattan => "Manhattan distance",
+            CorrelationMethod::Mahalanobis => "Mahalanobis distance",
         }
+    }
+
+    fn is_distance(self) -> bool {
+        matches!(
+            self,
+            CorrelationMethod::Euclidean
+                | CorrelationMethod::Manhattan
+                | CorrelationMethod::Mahalanobis
+        )
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 enum EmbeddingMethod {
     Pca,
     Tsne,
     Umap,
+    Pacmap,
 }
 
 impl EmbeddingMethod {
@@ -47,7 +74,12 @@ impl EmbeddingMethod {
             EmbeddingMethod::Pca => "pca",
             EmbeddingMethod::Tsne => "tsne",
             EmbeddingMethod::Umap => "umap",
+            EmbeddingMethod::Pacmap => "pacmap",
         }
+    }
+
+    fn needs_dense_features(self) -> bool {
+        !matches!(self, EmbeddingMethod::Pca)
     }
 }
 
@@ -153,6 +185,125 @@ impl CosineAccumulator {
     }
 }
 
+struct DistanceAccumulator {
+    euclidean_sumsq: Vec<f64>,
+    manhattan_sum: Vec<f64>,
+    mahalanobis_diag_sumsq: Vec<f64>,
+}
+
+impl DistanceAccumulator {
+    fn new(samples: usize) -> Self {
+        Self {
+            euclidean_sumsq: vec![0.0; samples * samples],
+            manhattan_sum: vec![0.0; samples * samples],
+            mahalanobis_diag_sumsq: vec![0.0; samples * samples],
+        }
+    }
+
+    fn update(&mut self, values: &[f64]) {
+        let n = values.len();
+        let mean = values.iter().sum::<f64>() / n.max(1) as f64;
+        let row_var = values
+            .iter()
+            .map(|value| {
+                let delta = *value - mean;
+                delta * delta
+            })
+            .sum::<f64>()
+            / n.max(1) as f64;
+        let weight = if row_var > 1e-12 { 1.0 / row_var } else { 0.0 };
+        for i in 0..n {
+            for j in i..n {
+                let idx = i * n + j;
+                let delta = values[i] - values[j];
+                self.euclidean_sumsq[idx] += delta * delta;
+                self.manhattan_sum[idx] += delta.abs();
+                self.mahalanobis_diag_sumsq[idx] += delta * delta * weight;
+            }
+        }
+    }
+
+    fn value(&self, method: CorrelationMethod, i: usize, j: usize, n: usize) -> f64 {
+        let idx = if j >= i { i * n + j } else { j * n + i };
+        match method {
+            CorrelationMethod::Euclidean => self.euclidean_sumsq[idx].sqrt(),
+            CorrelationMethod::Manhattan => self.manhattan_sum[idx],
+            CorrelationMethod::Mahalanobis => self.mahalanobis_diag_sumsq[idx].sqrt(),
+            _ => 0.0,
+        }
+    }
+
+    fn write_tsv(
+        &self,
+        labels: &[String],
+        method: CorrelationMethod,
+        path: &Path,
+    ) -> anyhow::Result<()> {
+        write_square_matrix(labels, path, |i, j, n| self.value(method, i, j, n))
+    }
+}
+
+fn push_columns(columns: &mut [Vec<f64>], values: &[f64]) {
+    for (column, value) in columns.iter_mut().zip(values.iter()) {
+        column.push(*value);
+    }
+}
+
+fn average_ranks(values: &[f64]) -> Vec<f64> {
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(|a, b| {
+        values[*a]
+            .partial_cmp(&values[*b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut ranks = vec![0.0; values.len()];
+    let mut start = 0usize;
+    while start < order.len() {
+        let mut end = start + 1;
+        while end < order.len() && values[order[start]] == values[order[end]] {
+            end += 1;
+        }
+        let rank = (start + 1 + end) as f64 / 2.0;
+        for idx in start..end {
+            ranks[order[idx]] = rank;
+        }
+        start = end;
+    }
+    ranks
+}
+
+fn write_spearman_tsv(columns: &[Vec<f64>], labels: &[String], path: &Path) -> anyhow::Result<()> {
+    if columns.is_empty() {
+        return write_square_matrix(labels, path, |_, _, _| 0.0);
+    }
+    let ranks = columns
+        .iter()
+        .map(|column| average_ranks(column))
+        .collect::<Vec<_>>();
+    write_square_matrix(labels, path, |i, j, _| pearson_slice(&ranks[i], &ranks[j]))
+}
+
+fn pearson_slice(x: &[f64], y: &[f64]) -> f64 {
+    if x.len() != y.len() || x.is_empty() {
+        return 0.0;
+    }
+    let n = x.len() as f64;
+    let sum_x = x.iter().sum::<f64>();
+    let sum_y = y.iter().sum::<f64>();
+    let sumsq_x = x.iter().map(|value| value * value).sum::<f64>();
+    let sumsq_y = y.iter().map(|value| value * value).sum::<f64>();
+    let cross = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum::<f64>();
+    let numerator = cross - (sum_x * sum_y / n);
+    let denom_x = sumsq_x - (sum_x * sum_x / n);
+    let denom_y = sumsq_y - (sum_y * sum_y / n);
+    let denom = (denom_x.max(0.0) * denom_y.max(0.0)).sqrt();
+    if denom > 0.0 {
+        numerator / denom
+    } else {
+        0.0
+    }
+}
+
 struct OnlineHeatmap {
     centroids: Vec<Vec<f64>>,
     counts: Vec<u64>,
@@ -220,9 +371,20 @@ impl OnlineHeatmap {
 
 fn selected_correlation_methods(mode: CorrelationMode) -> Vec<CorrelationMethod> {
     match mode {
-        CorrelationMode::All => vec![CorrelationMethod::Pearson, CorrelationMethod::Cosine],
+        CorrelationMode::All => vec![
+            CorrelationMethod::Pearson,
+            CorrelationMethod::Spearman,
+            CorrelationMethod::Cosine,
+            CorrelationMethod::Euclidean,
+            CorrelationMethod::Manhattan,
+            CorrelationMethod::Mahalanobis,
+        ],
         CorrelationMode::Pearson => vec![CorrelationMethod::Pearson],
+        CorrelationMode::Spearman => vec![CorrelationMethod::Spearman],
         CorrelationMode::Cosine => vec![CorrelationMethod::Cosine],
+        CorrelationMode::Euclidean => vec![CorrelationMethod::Euclidean],
+        CorrelationMode::Manhattan => vec![CorrelationMethod::Manhattan],
+        CorrelationMode::Mahalanobis => vec![CorrelationMethod::Mahalanobis],
     }
 }
 
@@ -232,10 +394,12 @@ fn selected_embedding_methods(mode: EmbeddingMode) -> Vec<EmbeddingMethod> {
             EmbeddingMethod::Pca,
             EmbeddingMethod::Tsne,
             EmbeddingMethod::Umap,
+            EmbeddingMethod::Pacmap,
         ],
         EmbeddingMode::Pca => vec![EmbeddingMethod::Pca],
         EmbeddingMode::Tsne => vec![EmbeddingMethod::Tsne],
         EmbeddingMode::Umap => vec![EmbeddingMethod::Umap],
+        EmbeddingMode::Pacmap => vec![EmbeddingMethod::Pacmap],
     }
 }
 
@@ -294,6 +458,13 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
         args.output_dir
     );
     let readers = open_readers(&args.inputs)?;
+    for (label, reader) in labels.iter().zip(readers.iter()) {
+        eprintln!(
+            "[kite analyze] input {} filters: {}",
+            label,
+            format_reader_filter(reader)
+        );
+    }
     let meta = ensure_compatible(&readers)?;
     let out_dir = Path::new(&args.output_dir);
 
@@ -304,6 +475,15 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     let heatmap_clusters_path = out_dir.join("heatmap_clusters.tsv");
     let heatmap_samples_path = out_dir.join("heatmap_samples.tsv");
     let quarto_path = out_dir.join("analysis_report.qmd");
+    let correlation_methods = selected_correlation_methods(args.correlation);
+    let embedding_methods = selected_embedding_methods(args.embedding);
+    let needs_spearman = correlation_methods.contains(&CorrelationMethod::Spearman);
+    let needs_distances = correlation_methods
+        .iter()
+        .any(|method| method.is_distance());
+    let needs_dense_embedding = embedding_methods
+        .iter()
+        .any(|method| method.needs_dense_features());
 
     let mut matrix = BufWriter::new(File::create(&matrix_path)?);
     let mut heatmap_matrix = BufWriter::new(File::create(&heatmap_matrix_path)?);
@@ -324,6 +504,10 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     let mut sample_nonzero = vec![0u64; labels.len()];
     let mut pearson = PearsonAccumulator::new(labels.len());
     let mut cosine = CosineAccumulator::new(labels.len());
+    let mut distances = needs_distances.then(|| DistanceAccumulator::new(labels.len()));
+    let mut spearman_columns =
+        needs_spearman.then(|| (0..labels.len()).map(|_| Vec::new()).collect::<Vec<_>>());
+    let mut embedding_rows: Vec<Vec<f64>> = Vec::new();
     let mut heatmap = OnlineHeatmap::new(args.heatmap_kmeans);
     let mut heatmap_plot_rows: Vec<(String, usize, Vec<f64>)> =
         Vec::with_capacity(HEATMAP_PLOT_MAX_ROWS as usize);
@@ -333,7 +517,9 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     for partition_id in 0..meta.partitions {
         let mut vectors = Vec::with_capacity(readers.len());
         for reader in &readers {
-            vectors.push(load_partition_counts(reader, partition_id)?);
+            let mut rows = load_partition_counts(reader, partition_id)?;
+            apply_reader_filter_to_rows(reader, &mut rows);
+            vectors.push(rows);
         }
         for_each_union_row(&vectors, |key, row| {
             let kmer = key_to_string(key, &meta);
@@ -350,6 +536,15 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
             let values = transformed_values(row);
             pearson.update(&values);
             cosine.update(&values);
+            if let Some(distances) = distances.as_mut() {
+                distances.update(&values);
+            }
+            if let Some(columns) = spearman_columns.as_mut() {
+                push_columns(columns, &values);
+            }
+            if needs_dense_embedding {
+                embedding_rows.push(values.clone());
+            }
             let cluster = heatmap.assign(&values);
             let scaled = row_zscore(&values);
             write_heatmap_row(&mut heatmap_matrix, &kmer, cluster, &scaled)?;
@@ -366,6 +561,9 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     matrix.flush()?;
     heatmap_matrix.flush()?;
     heatmap_plot_matrix.flush()?;
+    if args.progress {
+        eprintln!("[kite analyze] stage 2/4: writing heatmap summaries");
+    }
     heatmap.write_centroids(&labels, &heatmap_clusters_path)?;
     write_sample_order(
         &labels,
@@ -374,20 +572,51 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
         &heatmap_samples_path,
     )?;
 
-    let correlation_methods = selected_correlation_methods(args.correlation);
+    if args.progress {
+        eprintln!(
+            "[kite analyze] stage 3/4: writing {} correlation/distance table(s)",
+            correlation_methods.len()
+        );
+    }
     for method in &correlation_methods {
         let path = out_dir.join(format!("correlation_{}.tsv", method.slug()));
         match method {
             CorrelationMethod::Pearson => pearson.write_tsv(&labels, &path)?,
+            CorrelationMethod::Spearman => {
+                let columns = spearman_columns
+                    .as_ref()
+                    .context("internal error: Spearman columns were not collected")?;
+                write_spearman_tsv(columns, &labels, &path)?;
+            }
             CorrelationMethod::Cosine => cosine.write_tsv(&labels, &path)?,
+            CorrelationMethod::Euclidean
+            | CorrelationMethod::Manhattan
+            | CorrelationMethod::Mahalanobis => {
+                let distances = distances
+                    .as_ref()
+                    .context("internal error: distance accumulators were not collected")?;
+                distances.write_tsv(&labels, *method, &path)?;
+            }
         }
     }
 
-    let embedding_methods = selected_embedding_methods(args.embedding);
     let pca_scores = pca_scores(&pearson.covariance_matrix(labels.len()), labels.len(), 2);
+    if args.progress {
+        eprintln!(
+            "[kite analyze] stage 4/4: writing {} embedding table(s)",
+            embedding_methods.len()
+        );
+    }
     for method in &embedding_methods {
         let path = out_dir.join(format!("embedding_{}.tsv", method.slug()));
-        write_embedding_table(&labels, &pca_scores, *method, &path)?;
+        let scores = match method {
+            EmbeddingMethod::Pca => pca_scores.clone(),
+            EmbeddingMethod::Tsne | EmbeddingMethod::Umap | EmbeddingMethod::Pacmap => {
+                manifold_embedding(&embedding_rows, labels.len(), *method, args.heatmap_seed)
+                    .with_context(|| format!("failed to compute {} embedding", method.slug()))?
+            }
+        };
+        write_embedding_table(&labels, &scores, *method, &path)?;
     }
 
     let mut summary = BufWriter::new(File::create(&summary_path)?);
@@ -470,22 +699,13 @@ fn write_sample_order(
     pearson: &PearsonAccumulator,
     path: &Path,
 ) -> anyhow::Result<()> {
-    let mut order: Vec<usize> = (0..labels.len()).collect();
-    if cluster_samples && labels.len() > 2 {
-        order.sort_by(|a, b| {
-            let score_a: f64 = (0..labels.len())
-                .filter(|i| i != a)
-                .map(|i| pearson.correlation(*a, i, labels.len()))
-                .sum();
-            let score_b: f64 = (0..labels.len())
-                .filter(|i| i != b)
-                .map(|i| pearson.correlation(*b, i, labels.len()))
-                .sum();
-            score_b
-                .partial_cmp(&score_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-    }
+    let order = if cluster_samples && labels.len() > 2 {
+        average_linkage_order(labels.len(), |i, j| {
+            1.0 - pearson.correlation(i, j, labels.len()).clamp(-1.0, 1.0)
+        })
+    } else {
+        (0..labels.len()).collect()
+    };
     let mut out = BufWriter::new(File::create(path)?);
     writeln!(out, "sample\torder")?;
     for (rank, idx) in order.iter().enumerate() {
@@ -495,44 +715,143 @@ fn write_sample_order(
     Ok(())
 }
 
-fn pca_scores(cov: &[f64], n: usize, dims: usize) -> Vec<Vec<f64>> {
-    let mut residual = cov.to_vec();
-    let mut scores = vec![vec![0.0; dims]; n];
-    for dim in 0..dims {
-        let mut v = vec![1.0 / (n.max(1) as f64).sqrt(); n];
-        for _ in 0..100 {
-            let mut next = vec![0.0; n];
-            for i in 0..n {
-                for j in 0..n {
-                    next[i] += residual[i * n + j] * v[j];
+fn average_linkage_order<F>(n: usize, mut distance: F) -> Vec<usize>
+where
+    F: FnMut(usize, usize) -> f64,
+{
+    let mut clusters: Vec<Vec<usize>> = (0..n).map(|idx| vec![idx]).collect();
+    while clusters.len() > 1 {
+        let mut best = (0usize, 1usize);
+        let mut best_dist = f64::INFINITY;
+        for i in 0..clusters.len() {
+            for j in (i + 1)..clusters.len() {
+                let mut total = 0.0;
+                let mut pairs = 0usize;
+                for a in &clusters[i] {
+                    for b in &clusters[j] {
+                        total += distance(*a, *b);
+                        pairs += 1;
+                    }
+                }
+                let avg = total / pairs.max(1) as f64;
+                if avg < best_dist {
+                    best_dist = avg;
+                    best = (i, j);
                 }
             }
-            let norm = next.iter().map(|x| x * x).sum::<f64>().sqrt();
-            if norm <= 0.0 {
-                break;
-            }
-            for value in &mut next {
-                *value /= norm;
-            }
-            v = next;
         }
-        let mut lambda = 0.0;
+        let right = clusters.remove(best.1);
+        clusters[best.0].extend(right);
+    }
+    clusters.pop().unwrap_or_default()
+}
+
+fn pca_scores(cov: &[f64], n: usize, dims: usize) -> Vec<Vec<f64>> {
+    let mut scores = vec![vec![0.0; dims]; n];
+    if n == 0 || dims == 0 {
+        return scores;
+    }
+    let matrix = DMatrix::from_row_slice(n, n, cov);
+    let eigen = SymmetricEigen::new(matrix);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|a, b| {
+        eigen.eigenvalues[*b]
+            .partial_cmp(&eigen.eigenvalues[*a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (dim, eig_idx) in order.into_iter().take(dims).enumerate() {
+        let scale = eigen.eigenvalues[eig_idx].max(0.0).sqrt();
         for i in 0..n {
-            for j in 0..n {
-                lambda += v[i] * residual[i * n + j] * v[j];
-            }
-        }
-        let scale = lambda.max(0.0).sqrt();
-        for i in 0..n {
-            scores[i][dim] = v[i] * scale;
-        }
-        for i in 0..n {
-            for j in 0..n {
-                residual[i * n + j] -= lambda * v[i] * v[j];
-            }
+            scores[i][dim] = eigen.eigenvectors[(i, eig_idx)] * scale;
         }
     }
     scores
+}
+
+fn manifold_embedding(
+    feature_rows: &[Vec<f64>],
+    samples: usize,
+    method: EmbeddingMethod,
+    seed: u64,
+) -> anyhow::Result<Vec<Vec<f64>>> {
+    if samples == 0 {
+        return Ok(Vec::new());
+    }
+    if samples < 4 || feature_rows.is_empty() {
+        eprintln!(
+            "[kite analyze] {} needs at least 4 samples and non-empty features; writing zero coordinates",
+            method.slug()
+        );
+        return Ok(vec![vec![0.0; 2]; samples]);
+    }
+    let features = feature_rows.len();
+    let matrix = Mat::from_fn(samples, features, |sample, feature| {
+        feature_rows[feature][sample]
+    });
+    let seed = seed as usize;
+    let embedding = match method {
+        EmbeddingMethod::Tsne => {
+            let max_perplexity = ((samples - 1) / 3).max(1) as f64;
+            let perplexity = max_perplexity.min(30.0).max(1.0);
+            let params = TsneParams::new(
+                Some(2),
+                Some(perplexity),
+                None,
+                Some(200.0),
+                Some(750),
+                Some("kmknn".to_string()),
+                Some(0.5),
+                Some(3),
+            );
+            tsne(matrix.as_ref(), None, &params, "bh", seed, false)?
+        }
+        EmbeddingMethod::Umap => {
+            let k = (samples - 1).clamp(2, 15);
+            let params = UmapParams::default_2d(Some(2), Some(k), Some(0.1), Some(1.0));
+            umap(matrix.as_ref(), None, &params, seed, false)?
+        }
+        EmbeddingMethod::Pacmap => {
+            let k = (samples - 1).clamp(2, 10);
+            let mn_end = (samples - 1).clamp(k, 50);
+            let params = PacmapParams::new(
+                Some(2),
+                Some(k),
+                Some("kmknn".to_string()),
+                Some("adam_parallel".to_string()),
+                None,
+                None,
+                None,
+                Some(mn_end),
+                Some("pca".to_string()),
+                None,
+                None,
+            );
+            pacmap(matrix.as_ref(), None, &params, seed, false)?
+        }
+        EmbeddingMethod::Pca => unreachable!("PCA does not use manifold_embedding"),
+    };
+    embedding_to_scores(embedding, samples)
+}
+
+fn embedding_to_scores(embedding: Vec<Vec<f64>>, samples: usize) -> anyhow::Result<Vec<Vec<f64>>> {
+    let mut scores = vec![vec![0.0; 2]; samples];
+    for dim in 0..2 {
+        let Some(values) = embedding.get(dim) else {
+            continue;
+        };
+        if values.len() != samples {
+            anyhow::bail!(
+                "embedding dimension {} has {} rows, expected {}",
+                dim + 1,
+                values.len(),
+                samples
+            );
+        }
+        for sample in 0..samples {
+            scores[sample][dim] = values[sample];
+        }
+    }
+    Ok(scores)
 }
 
 fn write_embedding_table(
@@ -747,12 +1066,13 @@ save_plot(p_summary, "sample_summary.png", width = 8, height = 5)
 
 # Correlation
 
-The generated correlation tables are: `{correlation_list}`. When `--correlation pearson` or `--correlation cosine` is used, only that method-specific table is written.
+The generated correlation and distance tables are: `{correlation_list}`. The default command writes only `correlation_pearson.tsv`; use `--correlation all` or a specific method to write additional tables.
 
 ```{{r}}
 plot_correlation <- function(name, palette_low = "#2166AC", palette_high = "#B2182B") {{
   df <- read_kite_tsv(name)
   labels <- colnames(df)[-1]
+  is_distance <- grepl("euclidean|manhattan|mahalanobis", name)
   long <- df |>
     tidyr::pivot_longer(
       cols = -sample,
@@ -763,17 +1083,21 @@ plot_correlation <- function(name, palette_low = "#2166AC", palette_high = "#B21
       sample_x = factor(sample_x, levels = labels),
       sample_y = factor(sample, levels = rev(labels))
     )
-  ggplot(long, aes(sample_x, sample_y, fill = value)) +
+  p <- ggplot(long, aes(sample_x, sample_y, fill = value)) +
     geom_tile(color = "white", linewidth = 0.25) +
     coord_equal() +
-    scale_fill_gradient2(low = palette_low, mid = "white", high = palette_high,
-                         midpoint = 0, limits = c(-1, 1), oob = squish) +
-    labs(x = NULL, y = NULL, fill = "correlation", title = sub("\\\\.tsv$", "", name)) +
+    labs(x = NULL, y = NULL, fill = ifelse(is_distance, "distance", "correlation"), title = sub("\\\\.tsv$", "", name)) +
     kite_theme(base_size = 12) +
     theme(
       axis.text.x = element_text(angle = 45, hjust = 1),
       panel.grid = element_blank()
     )
+  if (is_distance) {{
+    p + scale_fill_viridis_c(option = "magma", direction = -1)
+  }} else {{
+    p + scale_fill_gradient2(low = palette_low, mid = "white", high = palette_high,
+                             midpoint = 0, limits = c(-1, 1), oob = squish)
+  }}
 }}
 
 correlation_files <- Sys.glob(file.path(out_dir, "correlation_*.tsv"))
@@ -949,4 +1273,130 @@ The TSV workflow remains deterministic and independent from plotting. Rerender t
         heatmap_kmeans = heatmap_kmeans,
         cluster_samples = cluster_samples,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_close(left: f64, right: f64) {
+        assert!((left - right).abs() < 1e-8, "left={left}, right={right}");
+    }
+
+    #[test]
+    fn average_ranks_handles_ties() {
+        assert_eq!(
+            average_ranks(&[10.0, 20.0, 20.0, 30.0]),
+            vec![1.0, 2.5, 2.5, 4.0]
+        );
+        assert_eq!(
+            average_ranks(&[3.0, 1.0, 3.0, 2.0]),
+            vec![3.5, 1.0, 3.5, 2.0]
+        );
+    }
+
+    #[test]
+    fn pearson_slice_matches_expected_correlation() {
+        assert_close(pearson_slice(&[1.0, 2.0, 3.0], &[2.0, 4.0, 6.0]), 1.0);
+        assert_close(pearson_slice(&[1.0, 2.0, 3.0], &[6.0, 4.0, 2.0]), -1.0);
+        assert_close(pearson_slice(&[1.0, 1.0, 1.0], &[2.0, 3.0, 4.0]), 0.0);
+    }
+
+    #[test]
+    fn accumulators_compute_pearson_cosine_and_distances() {
+        let rows = [vec![1.0, 2.0], vec![2.0, 4.0], vec![3.0, 6.0]];
+        let mut pearson = PearsonAccumulator::new(2);
+        let mut cosine = CosineAccumulator::new(2);
+        let mut distances = DistanceAccumulator::new(2);
+        for row in &rows {
+            pearson.update(row);
+            cosine.update(row);
+            distances.update(row);
+        }
+        assert_close(pearson.correlation(0, 1, 2), 1.0);
+        assert_close(cosine.correlation(0, 1, 2), 1.0);
+        assert_close(
+            distances.value(CorrelationMethod::Euclidean, 0, 1, 2),
+            14.0_f64.sqrt(),
+        );
+        assert_close(distances.value(CorrelationMethod::Manhattan, 0, 1, 2), 6.0);
+        assert!(distances.value(CorrelationMethod::Mahalanobis, 0, 1, 2) > 0.0);
+    }
+
+    #[test]
+    fn selected_methods_expand_all_and_defaults() {
+        let correlation = selected_correlation_methods(CorrelationMode::All)
+            .into_iter()
+            .map(|method| method.slug())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            correlation,
+            vec![
+                "pearson",
+                "spearman",
+                "cosine",
+                "euclidean",
+                "manhattan",
+                "mahalanobis"
+            ]
+        );
+
+        let embedding = selected_embedding_methods(EmbeddingMode::All)
+            .into_iter()
+            .map(|method| method.slug())
+            .collect::<Vec<_>>();
+        assert_eq!(embedding, vec!["pca", "tsne", "umap", "pacmap"]);
+        assert_eq!(
+            selected_embedding_methods(EmbeddingMode::Pca)[0].needs_dense_features(),
+            false
+        );
+        assert!(selected_embedding_methods(EmbeddingMode::Umap)[0].needs_dense_features());
+    }
+
+    #[test]
+    fn row_zscore_centers_and_scales_rows() {
+        let scaled = row_zscore(&[1.0, 2.0, 3.0]);
+        assert_close(scaled.iter().sum::<f64>(), 0.0);
+        let variance = scaled.iter().map(|value| value * value).sum::<f64>() / scaled.len() as f64;
+        assert_close(variance, 1.0);
+        assert_eq!(row_zscore(&[5.0, 5.0]), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn average_linkage_order_keeps_closest_samples_adjacent() {
+        let order = average_linkage_order(3, |i, j| match (i.min(j), i.max(j)) {
+            (0, 1) => 0.1,
+            (0, 2) => 5.0,
+            (1, 2) => 4.0,
+            _ => 0.0,
+        });
+        let pos0 = order.iter().position(|idx| *idx == 0).unwrap();
+        let pos1 = order.iter().position(|idx| *idx == 1).unwrap();
+        assert_eq!(pos0.abs_diff(pos1), 1);
+    }
+
+    #[test]
+    fn pca_scores_returns_requested_shape() {
+        let scores = pca_scores(&[2.0, 0.0, 0.0, 1.0], 2, 2);
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0].len(), 2);
+        assert!(scores.iter().flatten().any(|value| value.abs() > 0.0));
+    }
+
+    #[test]
+    fn embedding_to_scores_validates_dimensions() {
+        let scores = embedding_to_scores(vec![vec![1.0, 2.0], vec![3.0, 4.0]], 2).unwrap();
+        assert_eq!(scores, vec![vec![1.0, 3.0], vec![2.0, 4.0]]);
+        assert!(embedding_to_scores(vec![vec![1.0]], 2).is_err());
+    }
+
+    #[test]
+    fn online_heatmap_assigns_and_updates_centroids() {
+        let mut heatmap = OnlineHeatmap::new(2);
+        assert_eq!(heatmap.assign(&[1.0, 2.0, 3.0]), 1);
+        assert_eq!(heatmap.assign(&[3.0, 2.0, 1.0]), 2);
+        let cluster = heatmap.assign(&[1.1, 2.0, 2.9]);
+        assert_eq!(cluster, 1);
+        assert_eq!(heatmap.counts, vec![2, 1]);
+    }
 }

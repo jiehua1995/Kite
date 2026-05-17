@@ -1,3 +1,4 @@
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::time::Instant;
 
@@ -5,12 +6,50 @@ use anyhow::Context;
 
 use crate::cli::InfoArgs;
 use crate::dump::reader::KiteReader;
+use crate::format::header::update_count_filters_in_file;
 use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
+use crate::kiteops::format_count_filter;
 use crate::stats::print_simple_test_report;
 
 pub fn run_info(args: &InfoArgs) -> anyhow::Result<()> {
     let started = Instant::now();
+    if args.set_min.is_some() && args.clear_min {
+        anyhow::bail!("--set-min and --clear-min cannot be used together");
+    }
+    if args.set_max.is_some() && args.clear_max {
+        anyhow::bail!("--set-max and --clear-max cannot be used together");
+    }
     eprintln!("[kite info] opening: {}", args.input);
+    if args.set_min.is_some() || args.set_max.is_some() || args.clear_min || args.clear_max {
+        let current = KiteReader::open(&args.input)
+            .with_context(|| format!("failed to open {}", args.input))?
+            .header;
+        let new_min = if args.clear_min {
+            None
+        } else {
+            args.set_min.or(current.min_count)
+        };
+        let new_max = if args.clear_max {
+            None
+        } else {
+            args.set_max.or(current.max_count)
+        };
+        if let (Some(min), Some(max)) = (new_min, new_max) {
+            if min > max {
+                anyhow::bail!("header min ({}) must be <= header max ({})", min, max);
+            }
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&args.input)?;
+        update_count_filters_in_file(&mut file, new_min, new_max)?;
+        eprintln!(
+            "[kite info] updated header count filters: min={}, max={}",
+            format_count_filter(new_min),
+            format_count_filter(new_max),
+        );
+    }
     let reader =
         KiteReader::open(&args.input).with_context(|| format!("failed to open {}", args.input))?;
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
@@ -78,6 +117,20 @@ pub fn run_info(args: &InfoArgs) -> anyhow::Result<()> {
         "  Canonical:          {}",
         reader.header.canonical != 0
     )?;
+    writeln!(
+        out,
+        "  Min Count:          {}",
+        format_count_filter(reader.header.min_count)
+    )?;
+    writeln!(
+        out,
+        "  Max Count:          {}",
+        format_count_filter(reader.header.max_count)
+    )?;
+    writeln!(
+        out,
+        "  Filter Semantics:   downstream commands exclude rows outside Min/Max"
+    )?;
     writeln!(out, "  Partitions:         {}", reader.header.partitions)?;
     writeln!(out, "  Key Width:          {}", reader.header.key_width)?;
     writeln!(out)?;
@@ -108,6 +161,8 @@ pub fn run_info(args: &InfoArgs) -> anyhow::Result<()> {
                 ("partitions", reader.header.partitions.to_string()),
                 ("total_chunks", reader.total_chunks.to_string()),
                 ("total_rows", reader.header.total_rows.to_string()),
+                ("min", format_count_filter(reader.header.min_count)),
+                ("max", format_count_filter(reader.header.max_count)),
             ],
             wall,
         );

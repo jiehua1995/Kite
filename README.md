@@ -33,13 +33,14 @@ Kite is organized as a command-oriented codebase. Each subcommand lives in its o
 
 | Principle | Meaning |
 |---|---|
-| Minimal inspection commands | `info` and `query` print directly to stdout and do not expose thread, memory, output, or progress options. |
+| Minimal inspection commands | `info` and `query` print directly to stdout and do not expose thread, memory, output, or progress options; `info` can also edit header-only filter markers. |
 | Multi-file input style | Commands that accept multiple inputs use one `-i/--input` followed by all files, for example `-i sample1.kite sample2.kite`. |
 | Consistent sample labeling | `histo`, `profile`, `analyze`, and `fly` use `--label sample1 sample2 ...`; label count must match input count. |
 | Strict memory syntax | `count` and `fly` use `--memory`, with values like `512M`, `64G`, or `1T`. The suffix must be `M`, `G`, or `T`. |
 | Simple thread convention | Commands that expose thread control use `-t, --threads`. |
+| Lazy count filters | `count --min/--max` stores filter markers in the `.kite` header without deleting raw counts. Downstream commands apply those markers when exporting or analyzing. |
 | Quarto/R reporting | `analyze` writes TSV tables and `analysis_report.qmd`; render the report with Quarto/R to generate figures. |
-| One-shot workflow | `fly` is intentionally a small, practical wrapper around `count` and `analyze`, not a kitchen-sink interface. |
+| One-shot workflow | `fly` forwards the core `count` and `analyze` options so a one-command workflow has the same semantics as running the stages manually. |
 
 ## Build
 
@@ -64,7 +65,9 @@ Count 31-mers:
   -o sample.kite \
   -t 48 \
   --memory 64G \
-  --buffer 16 \
+  --buffer 32 \
+  --min 2 \
+  --max 1000000 \
   -p
 ```
 
@@ -82,6 +85,13 @@ Inspect a database:
 
 ```bash
 ./target/release/kite info -i sample.kite
+```
+
+Edit the lazy count-filter markers stored in a database header:
+
+```bash
+./target/release/kite info -i sample.kite --set-min 2 --set-max 1000000
+./target/release/kite info -i sample.kite --clear-min --clear-max
 ```
 
 Query one k-mer:
@@ -140,6 +150,9 @@ Run the full one-shot workflow:
   -k 31 \
   -t 48 \
   --memory 64G \
+  --min 2 \
+  --max 1000000 \
+  --buffer 32 \
   --correlation all \
   --embedding all \
   --heatmap-kmeans 6 \
@@ -161,10 +174,14 @@ Run the full one-shot workflow:
 | `--chunk-kmers` | `8000000` | Reader-side target batch size | Affects flushing and memory behavior |
 | `--memory` | auto-detected | Total memory budget | Must be written as `512M`, `64G`, or `1T` |
 | `--canonical` | `false` | Whether to canonicalize k-mers | Accepts `true` or `false`; changes result semantics |
+| `--min` | none | Header minimum count marker | Raw counts are retained; downstream commands hide counts below this marker |
+| `--max` | none | Header maximum count marker | Raw counts are retained; downstream commands hide counts above this marker |
 | `--mode` | `fast` | Output compression mode | `fast` writes DVLE/raw only; `balanced` and `compact` additionally try zstd when smaller |
-| `--buffer` | `16` | Target staging buffer size in MB | Independent of `--mode`; larger values may reduce flushes but use more memory |
+| `--buffer` | `32` | Target staging buffer size in MB | Independent of `--mode`; larger values may reduce flushes but use more memory; planner falls back to smaller buffers when memory is tight |
 | `-p, --progress` | `false` | Show progress | Useful for long jobs |
 | `--test-mode` | `false` | Print detailed runtime statistics | Useful for benchmarking and tuning |
+
+`--min` and `--max` are lazy filters. They are written into the `.kite` header and do not slow down `count` by rewriting the database. `dump`, `histo`, `profile`, `analyze`, and `merge` read these markers and exclude marked-out k-mers from their outputs. `query` still reports the raw stored count and tells you whether that k-mer is excluded by the current header markers. `info` can edit the markers in place without touching the stored count data.
 
 ### `kite dump`
 
@@ -176,13 +193,19 @@ Run the full one-shot workflow:
 | `-p, --progress` | `false` | Show progress | Useful for large files |
 | `--test-mode` | `false` | Print detailed runtime statistics | Useful for validation and benchmarking |
 
+`dump` applies the input file's header `Min Count` and `Max Count` markers while writing TSV. Use `kite info --set-min/--set-max` to change those markers without recounting.
+
 ### `kite info`
 
 | Argument | Description |
 |---|---|
 | `-i, --input` | Input `.kite` file |
+| `--set-min` | Set the header minimum count marker |
+| `--set-max` | Set the header maximum count marker |
+| `--clear-min` | Clear the header minimum count marker |
+| `--clear-max` | Clear the header maximum count marker |
 
-`info` prints a structured summary directly to stdout.
+`info` prints a structured summary directly to stdout. With edit options it updates only the fixed-size header metadata; the count data area is not rewritten. All downstream commands treat these markers as exclusion rules.
 
 ### `kite query`
 
@@ -191,7 +214,7 @@ Run the full one-shot workflow:
 | `-i, --input` | Input `.kite` file |
 | `-k, --kmer` | Exact query sequence |
 
-`query` prints the database path, query sequence, target partition, and exact count.
+`query` prints the database path, query sequence, target partition, exact raw count, header filter markers, and whether the queried k-mer is included in downstream output/analysis.
 
 ### `kite histo`
 
@@ -201,6 +224,8 @@ Run the full one-shot workflow:
 | `--label` | inferred from filenames | Sample labels | Must match the number of inputs |
 | `-o, --output` | required | Histogram TSV output | First column is `count` |
 | `-p, --progress` | `false` | Show progress | More useful for many inputs |
+
+`histo` applies each input file's header count filters before building count-frequency bins.
 
 ### `kite merge`
 
@@ -217,6 +242,8 @@ Compatibility requirements:
 - same `partitions`
 - same `key_width`
 
+`merge` applies each input file's header filters before summing counts. If every input has the same `Min Count` or `Max Count` marker, that marker is copied to the merged output header; otherwise the merged output leaves the differing marker unset.
+
 ### `kite profile`
 
 | Option | Default | Description | Notes |
@@ -226,6 +253,8 @@ Compatibility requirements:
 | `-o, --output` | required | Output TSV path | First column is `kmer` |
 | `-p, --progress` | `false` | Show progress | Useful for multi-sample runs |
 
+`profile` applies each input file's header count filters before constructing the union-by-sample matrix.
+
 ### `kite analyze`
 
 | Option | Default | Description | Notes |
@@ -233,14 +262,14 @@ Compatibility requirements:
 | `-i, --input` | required | One or more `.kite` files | Use one `-i` followed by all files; builds an exact multi-sample matrix |
 | `--label` | inferred from filenames | Sample labels | Must match the number of inputs |
 | `-o, --output-dir` | required | Output directory | TSV tables and `analysis_report.qmd` are written here |
-| `--correlation` | `all` | Correlation mode | `all`, `pearson`, or `cosine` |
-| `--embedding` | `all` | Embedding mode | `all`, `pca`, `tsne`, or `umap` |
+| `--correlation` | `pearson` | Correlation or distance mode | `all`, `pearson`, `spearman`, `cosine`, `euclidean`, `manhattan`, or `mahalanobis` |
+| `--embedding` | `pca` | Embedding mode | `all`, `pca`, `tsne`, `umap`, or `pacmap` (`pcamap` is accepted as an alias) |
 | `--heatmap-kmeans` | `6` | Number of k-means row clusters for heatmap generation | Applied to top variable k-mers |
-| `--heatmap-seed` | `1` | Random seed for heatmap k-means and stochastic embeddings | Also used for `t-SNE` and `UMAP` |
+| `--heatmap-seed` | `1` | Random seed for heatmap k-means and stochastic embeddings | Also used for `t-SNE`, `UMAP`, and `PaCMAP` |
 | `--cluster-samples` | `true` | Cluster sample columns before writing heatmap outputs | Accepts `true` or `false` |
 | `-p, --progress` | `false` | Show progress | Recommended for larger runs |
 
-`analyze` writes exact tables in Rust and generates `analysis_report.qmd`. Render the Quarto document when you want R/ggplot2 and ComplexHeatmap figures.
+`analyze` applies each input file's header count filters before constructing the exact matrix. It writes exact tables in Rust and generates `analysis_report.qmd`. Render the Quarto document when you want R/ggplot2 and ComplexHeatmap figures.
 
 ### `kite analyze` Output Files
 
@@ -249,10 +278,15 @@ Compatibility requirements:
 | `exact_count_matrix.tsv` | Exact multi-sample raw-count matrix |
 | `sample_summary.tsv` | Per-sample total raw counts and nonzero k-mer counts |
 | `correlation_pearson.tsv` | Written when `--correlation all` or `pearson` is selected |
+| `correlation_spearman.tsv` | Written when `--correlation all` or `spearman` is selected |
 | `correlation_cosine.tsv` | Written when `--correlation all` or `cosine` is selected |
+| `correlation_euclidean.tsv` | Written when `--correlation all` or `euclidean` is selected |
+| `correlation_manhattan.tsv` | Written when `--correlation all` or `manhattan` is selected |
+| `correlation_mahalanobis.tsv` | Written when `--correlation all` or `mahalanobis` is selected; uses a streaming diagonal covariance approximation |
 | `embedding_pca.tsv` | Written when `--embedding all` or `pca` is selected |
 | `embedding_tsne.tsv` | Written when `--embedding all` or `tsne` is selected |
 | `embedding_umap.tsv` | Written when `--embedding all` or `umap` is selected |
+| `embedding_pacmap.tsv` | Written when `--embedding all` or `pacmap` is selected |
 | `heatmap_matrix.tsv` | Row-scaled heatmap matrix with cluster assignments |
 | `heatmap_plot_matrix.tsv` | Smaller heatmap matrix used by the Quarto report |
 | `heatmap_clusters.tsv` | Heatmap cluster centroids |
@@ -280,11 +314,17 @@ R-side notes:
 | `--label` | inferred from filenames | Sample labels | Must match the number of inputs |
 | `-o, --output-dir` | required | Output directory | Creates `databases/` and `analysis/` |
 | `-k, --kmer` | `31` | k-mer length used by count | |
-| `--canonical` | `false` | Whether to canonicalize k-mers in internal count jobs | Accepts `true` or `false`; `fly` uses `fast` mode internally |
+| `--canonical` | `false` | Whether to canonicalize k-mers in internal count jobs | Accepts `true` or `false` |
+| `--min` | none | Header minimum count marker forwarded to count | Downstream analyze in the same `fly` run excludes lower counts |
+| `--max` | none | Header maximum count marker forwarded to count | Downstream analyze in the same `fly` run excludes higher counts |
+| `--mode` | `fast` | Count compression mode | Same values and semantics as `kite count --mode` |
 | `-t, --threads` | `0` | Thread budget forwarded to count | `0` means auto |
 | `--memory` | auto-detected | Memory budget forwarded to count | Must use `M`, `G`, or `T` suffixes |
-| `--correlation` | `all` | Correlation mode passed to analyze | |
-| `--embedding` | `all` | Embedding mode passed to analyze | |
+| `--partitions` | `0` | Count partition count | `0` means auto |
+| `--chunk-kmers` | `8000000` | Count chunk size | Same semantics as `kite count` |
+| `--buffer` | `32` | Count staging buffer in MB | Same semantics as `kite count` |
+| `--correlation` | `pearson` | Correlation or distance mode passed to analyze | |
+| `--embedding` | `pca` | Embedding mode passed to analyze | |
 | `--heatmap-kmeans` | `6` | Heatmap row cluster count passed to analyze | |
 | `--heatmap-seed` | `1` | Random seed passed to analyze | |
 | `--cluster-samples` | `true` | Sample clustering flag passed to analyze | |

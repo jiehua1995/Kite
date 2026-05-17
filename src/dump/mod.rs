@@ -138,6 +138,8 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
         .iter()
         .map(|chunk| chunk.row_count)
         .sum();
+    let min_count = reader.header.min_count;
+    let max_count = reader.header.max_count;
 
     let chunk_counts: Vec<u64> = reader
         .partition_entries
@@ -167,6 +169,15 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
     eprintln!(
         "[kite dump] k={}, partitions={}, total_chunks={}",
         k, n_partitions, total_chunks
+    );
+    eprintln!(
+        "[kite dump] header filters min={}, max={}",
+        min_count
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        max_count
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
     );
     eprintln!(
         "[kite dump] slab_bytes={}, workers={}, channel_depth={}, mode={}",
@@ -214,6 +225,8 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
                 &slab_pool,
                 collect_timing,
                 &stats,
+                min_count,
+                max_count,
                 |bytes, rows| {
                     out.write_all(&bytes)?;
                     stats.add_rows(rows);
@@ -280,6 +293,8 @@ pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
                     &slab_pool,
                     collect_timing,
                     &stats_work,
+                    min_count,
+                    max_count,
                     |bytes, rows| {
                         let written = bytes.len() as u64;
                         tx.send(bytes).map_err(|_| {

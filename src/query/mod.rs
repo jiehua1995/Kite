@@ -7,7 +7,8 @@ use anyhow::Context;
 use crate::cli::QueryArgs;
 use crate::dump::reader::KiteReader;
 use crate::kiteops::{
-    bucket_for_key, encode_query_kmer, key_to_string, load_partition_counts, metadata_from_reader,
+    bucket_for_key, count_passes_reader_filter, encode_query_kmer, format_count_filter,
+    key_to_string, load_partition_counts, metadata_from_reader,
 };
 use crate::stats::print_simple_test_report;
 
@@ -39,6 +40,28 @@ pub fn run_query(args: &QueryArgs) -> anyhow::Result<()> {
     )?;
     writeln!(out, "  Partition:          {}", partition_id)?;
     writeln!(out, "  Count:              {}", count)?;
+    writeln!(
+        out,
+        "  Header Min Count:   {}",
+        format_count_filter(reader.header.min_count)
+    )?;
+    writeln!(
+        out,
+        "  Header Max Count:   {}",
+        format_count_filter(reader.header.max_count)
+    )?;
+    let excluded_by_header = count > 0 && !count_passes_reader_filter(&reader, count);
+    writeln!(
+        out,
+        "  Header Filter:      {}",
+        if count == 0 {
+            "not present"
+        } else if excluded_by_header {
+            "excluded from downstream analysis/output"
+        } else {
+            "included"
+        }
+    )?;
     out.flush()?;
     if args.test_mode {
         print_simple_test_report(
@@ -48,6 +71,18 @@ pub fn run_query(args: &QueryArgs) -> anyhow::Result<()> {
                 ("query", args.kmer.clone()),
                 ("partition", partition_id.to_string()),
                 ("count", count.to_string()),
+                ("header_min", format_count_filter(reader.header.min_count)),
+                ("header_max", format_count_filter(reader.header.max_count)),
+                (
+                    "header_filter",
+                    if count == 0 {
+                        "not_present".to_string()
+                    } else if excluded_by_header {
+                        "excluded".to_string()
+                    } else {
+                        "included".to_string()
+                    },
+                ),
             ],
             started.elapsed(),
         );

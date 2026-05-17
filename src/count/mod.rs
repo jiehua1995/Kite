@@ -212,6 +212,11 @@ pub fn run_count(args: &CountArgs) -> anyhow::Result<()> {
             args.partitions
         );
     }
+    if let (Some(min), Some(max)) = (args.min, args.max) {
+        if min > max {
+            anyhow::bail!("--min ({}) must be <= --max ({})", min, max);
+        }
+    }
 
     if args.k <= 31 {
         run_count_typed::<u64>(args)
@@ -294,8 +299,16 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     eprintln!("[kite count] output:      {}", args.output);
     eprintln!("[kite count] compression: {}", compression);
     eprintln!(
-        "[kite count] k={}, canonical={}, partitions={}",
-        args.k, args.canonical, plan.partitions
+        "[kite count] k={}, canonical={}, partitions={}, min={}, max={}",
+        args.k,
+        args.canonical,
+        plan.partitions,
+        args.min
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        args.max
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
     );
     eprintln!(
         "[kite count] mode={}, codec={}",
@@ -369,6 +382,8 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
         codec_mask,
         staging_bytes,
         writer_lanes,
+        args.min,
+        args.max,
     )?);
 
     let stats_reader = Arc::clone(&stats);
@@ -486,6 +501,21 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     let finalize_summary = Arc::into_inner(kite_writer)
         .ok_or_else(|| anyhow::anyhow!("count writer still has outstanding references"))?
         .finalize()?;
+    if let Some((running, handle)) = progress_handle {
+        running.store(false, Ordering::Relaxed);
+        let _ = handle.join();
+    }
+    if args.min.is_some() || args.max.is_some() {
+        eprintln!(
+            "[kite count] header filter markers saved: min={}, max={} (raw k-mers are retained in the .kite file)",
+            args.min
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            args.max
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+        );
+    }
     stats.set_partition_segment_distribution(
         finalize_summary.hottest_partition_segments,
         finalize_summary.least_partition_segments,
@@ -495,11 +525,6 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     }
 
     let wall = wall_start.elapsed();
-
-    if let Some((running, handle)) = progress_handle {
-        running.store(false, Ordering::Relaxed);
-        let _ = handle.join();
-    }
 
     if args.test_mode {
         let kite_size = std::fs::metadata(&output_path)
@@ -516,6 +541,24 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
             wall,
         );
     }
+    let reads = stats.reads_processed.load(Ordering::Relaxed);
+    let bases = stats.bases_processed.load(Ordering::Relaxed);
+    let kmers = stats.kmers_generated.load(Ordering::Relaxed);
+    eprintln!(
+        "[kite count] summary reads={} bases={} kmers={} raw_rows_written={} chunks={} header_min={} header_max={} elapsed={:.3}s",
+        reads,
+        bases,
+        kmers,
+        finalize_summary.total_rows,
+        finalize_summary.total_chunks,
+        args.min
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        args.max
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        wall.as_secs_f64(),
+    );
     eprintln!(
         "[kite count] done in {:.3}s ({}, {} chunks, {} rows)",
         wall.as_secs_f64(),
