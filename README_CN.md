@@ -3,24 +3,24 @@
 <p>
 	<img src="doc/logo.png" alt="logo" width="100" align="left">
 </p> 
-**Kite** 是一个用 Rust 编写的高性能精确 k-mer 工具箱，覆盖了从计数、存储、导出，到多样本分析和 Quarto/R 报告生成的一整条流程。
+**Kite** 是一个用 Rust 编写的高性能精确 k-mer 工具箱，覆盖了从计数、可复用 `.kite` 索引、导出，到多样本分析和 Quarto/R 报告生成的一整条流程。
 
 它的核心目标很明确：
 
 - `count` 要快
 - `dump` 要快
-- `.kite` 格式要清楚、可复用
-- 查看、合并、矩阵构建、分析和 Quarto/R 报告生成要内建
+- `.kite` 文件格式要清楚、版本化、可复用
+- 查看、合并、矩阵构建、分析、流程报告和 Quarto/R 报告生成要内建
 
-Kite 的代码结构按子命令组织。每个子命令基本都放在自己的 `src/<command>/` 目录中，而 `.kite` 格式和公共逻辑作为共享层被复用。
+Kite 的定位是“精确 k-mer counter + 下游分析桥梁”：先把精确 k-mer count 存成可复用索引，过滤规则只作为可编辑 header 元信息保存，后续命令可以复用同一个索引而不需要重新 count。`.kite` 文件格式见 [`docs/file_format.md`](docs/file_format.md)。
 
 ## 子命令总览
 
 | 子命令 | 作用 | 典型输入 | 典型输出 |
 |---|---|---|---|
-| `kite count` | 从 FASTQ 输入构建 `.kite` 数据库 | `FASTQ`、`FASTQ.GZ`、`BGZF FASTQ` | `.kite` |
-| `kite dump` | 从 `.kite` 导出精确 k-mer 计数表 | `.kite` | `TSV` |
-| `kite info` | 打印一个数据库的结构化元信息和摘要 | `.kite` | stdout |
+| `kite count` | 从 FASTQ 输入构建 `.kite` 索引 | `FASTQ`、`FASTQ.GZ`、`BGZF FASTQ` | `.kite` |
+| `kite dump` | 从 `.kite` 索引导出精确 k-mer 计数表 | `.kite` | `TSV` |
+| `kite info` | 打印或修改一个 `.kite` 索引的结构化元信息 | `.kite` | stdout |
 | `kite query` | 查询一个精确 k-mer 的计数 | `.kite` + k-mer | stdout |
 | `kite histo` | 统计一个或多个数据库的 count 频率分布 | `.kite`... | `.tsv` |
 | `kite merge` | 精确合并多个兼容数据库 | `.kite`... | `.kite` |
@@ -33,14 +33,14 @@ Kite 的代码结构按子命令组织。每个子命令基本都放在自己的
 
 | 原则 | 说明 |
 |---|---|
-| 查看命令尽量轻量 | `info` 和 `query` 直接输出到 stdout，不暴露线程、内存、输出路径和进度参数；`info` 也可以修改仅保存在 header 中的过滤标记。 |
+| 查看命令尽量轻量 | `info`、`query` 和 `citation` 直接输出到 stdout 或小文件，不暴露线程参数；`info` 也可以修改仅保存在 header 中的过滤标记。 |
 | 多文件输入风格统一 | 接受多个输入的命令统一使用一个 `-i/--input` 后接所有文件，例如 `-i sample1.kite sample2.kite`。 |
 | 样本标签统一 | `histo`、`profile`、`analyze`、`fly` 统一使用 `--label sample1 sample2 ...`，标签数必须和输入数一致。 |
 | 内存参数格式严格 | `count` 和 `fly` 使用 `--memory`，必须写成 `512M`、`64G`、`1T` 这种格式。 |
-| 线程参数统一 | 暴露线程控制的命令统一使用 `-t, --threads`。 |
+| 线程参数统一 | 计算密集型命令使用 `-t, --threads`；`0` 表示自动控制。元信息类命令保持最小参数面。 |
 | 延迟 count 过滤 | `count --min/--max` 只把过滤标记写入 `.kite` header，不删除原始计数；后续命令在导出或分析时读取这些标记并过滤。 |
-| Quarto/R 报告 | `analyze` 输出 TSV 表和 `analysis_report.qmd`；需要图片时用 Quarto/R 渲染报告。 |
-| `fly` 就是一键流程 | `fly` 会透传核心的 `count` 和 `analyze` 参数，因此一键流程和手动分阶段运行具有相同语义。 |
+| 报告输出 | `merge`、`analyze` 和 `fly` 会写 Markdown 报告，总结输入、输出、设置和耗时；`analyze` 还会写 `analysis_report.qmd` 用于 Quarto/R 出图。 |
+| `fly` 就是一键流程 | `fly` 会透传核心的 `count` 和 `analyze` 参数，写出 workflow 报告，并可选择保留或删除中间 `.kite` 文件。 |
 
 ## 构建
 
@@ -223,6 +223,7 @@ target/release/kite
 | `-i, --input` | 必填 | 一个或多个 `.kite` 文件 | 使用一个 `-i` 后接所有文件；每个输入对应一列 histogram |
 | `--label` | 由文件名推断 | 样本标签 | 数量必须和输入数一致 |
 | `-o, --output` | 必填 | histogram TSV 输出 | 第一列是 `count` |
+| `-t, --threads` | `0` | 并行处理输入文件的 worker 数 | `0` 表示自动 |
 | `-p, --progress` | `false` | 显示进度 | 输入较多时更有用 |
 
 `histo` 会先应用每个输入文件 header 中的 count 过滤标记，再构建 count 频率分布。
@@ -233,6 +234,7 @@ target/release/kite
 |---|---|---|---|
 | `-i, --input` | 必填 | 两个或更多 `.kite` 文件 | 使用一个 `-i` 后接所有文件；输入必须兼容 |
 | `-o, --output` | 必填 | 合并后的 `.kite` 输出路径 | 精确求和，不做 sketch |
+| `-t, --threads` | `0` | 每个分区并行读取输入的 worker 数 | `0` 表示自动 |
 | `-p, --progress` | `false` | 显示进度 | 同时会打印兼容性摘要 |
 
 兼容性要求：
@@ -242,7 +244,7 @@ target/release/kite
 - `partitions` 相同
 - `key_width` 相同
 
-`merge` 会先应用每个输入文件 header 中的过滤标记，再对剩余 k-mer 求和。如果所有输入具有相同的 `Min Count` 或 `Max Count` 标记，对应标记会写入合并后的输出 header；如果某个标记在输入间不一致，合并输出会把该标记留空。
+`merge` 会先应用每个输入文件 header 中的过滤标记，再对剩余 k-mer 求和。如果所有输入具有相同的 `Min Count` 或 `Max Count` 标记，对应标记会写入合并后的输出 header；如果某个标记在输入间不一致，合并输出会把该标记留空。合并完成后会在输出文件旁边写 `<output>.merge_report.md`。
 
 ### `kite profile`
 
@@ -251,6 +253,7 @@ target/release/kite
 | `-i, --input` | 必填 | 一个或多个 `.kite` 文件 | 使用一个 `-i` 后接所有文件；会对观察到的 k-mer 并集建表 |
 | `--label` | 由文件名推断 | 样本标签 | 数量必须和输入数一致 |
 | `-o, --output` | 必填 | 输出 TSV 路径 | 第一列为 `kmer` |
+| `-t, --threads` | `0` | 每个分区并行读取输入的 worker 数 | `0` 表示自动 |
 | `-p, --progress` | `false` | 显示进度 | 多样本时建议开启 |
 
 `profile` 会先应用每个输入文件 header 中的 count 过滤标记，再构建 union-by-sample 矩阵。
@@ -261,15 +264,16 @@ target/release/kite
 |---|---|---|---|
 | `-i, --input` | 必填 | 一个或多个 `.kite` 文件 | 使用一个 `-i` 后接所有文件；用于构建精确多样本矩阵 |
 | `--label` | 由文件名推断 | 样本标签 | 数量必须和输入数一致 |
-| `-o, --output-dir` | 必填 | 输出目录 | 输出 TSV 表和 `analysis_report.qmd` |
+| `-o, --output-dir` | 必填 | 输出目录 | 输出 TSV 表、`analysis_report.md` 和 `analysis_report.qmd` |
 | `--correlation` | `pearson` | 相关性或距离模式 | `all`、`pearson`、`spearman`、`cosine`、`euclidean`、`manhattan`、`mahalanobis` |
 | `--embedding` | `pca` | 降维模式 | `all`、`pca`、`tsne`、`umap`、`pacmap`（也接受别名 `pcamap`） |
 | `--heatmap-kmeans` | `6` | 热图行的 k-means 聚类数 | 应用于高方差 k-mer |
 | `--heatmap-seed` | `1` | 热图和随机降维的随机种子 | 同时影响 `t-SNE`、`UMAP` 和 `PaCMAP` |
 | `--cluster-samples` | `true` | 是否对样本列聚类排序 | 接受 `true` 或 `false` |
+| `-t, --threads` | `0` | 每个分区并行读取输入的 worker 数 | `0` 表示自动 |
 | `-p, --progress` | `false` | 显示进度 | 多样本分析建议开启 |
 
-`analyze` 会先应用每个输入文件 header 中的 count 过滤标记，再在 Rust 侧生成精确表，并生成 `analysis_report.qmd`。需要图片时，用 Quarto 渲染这个文档，由 R/ggplot2 和 ComplexHeatmap 负责出图。
+`analyze` 会先应用每个输入文件 header 中的 count 过滤标记，再在 Rust 侧生成精确表，写出静态运行摘要 `analysis_report.md`，并生成 `analysis_report.qmd`。需要图片时，用 Quarto 渲染这个文档，由 R/ggplot2 和 ComplexHeatmap 负责出图。
 
 ### `kite analyze` 输出文件
 
@@ -291,12 +295,16 @@ target/release/kite
 | `heatmap_plot_matrix.tsv` | Quarto 报告使用的较小热图矩阵 |
 | `heatmap_clusters.tsv` | 热图聚类中心表 |
 | `heatmap_samples.tsv` | 热图样本列顺序 |
+| `analysis_report.md` | 静态 Markdown 报告，记录输入、设置、选择的算法和输出文件清单 |
 | `analysis_report.qmd` | 用于从 TSV 表生成图片的 Quarto/R 报告 |
 
 R 端说明：
 
 - Kite 本身不渲染图片。
-- 生成的 `analysis_report.qmd` 在渲染时会声明并安装所需 R 包。
+- 生成的 `analysis_report.qmd` 在渲染时会声明并安装所需 R 包，然后先读取并总结 TSV 文件清单和样本信息，再开始作图。
+- 默认报告会用固定尺寸分别保存 PNG 和 PDF：样本 summary、相关性/距离热图、embedding 图、cluster representative heatmap。
+- 默认热图使用 `heatmap_clusters.tsv`，也就是每个 k-mer cluster 一行代表值；当 `--cluster-samples true` 时，样本列会带树状聚类图。
+- `heatmap_matrix.tsv` 仍然保留一个 exact k-mer 一行的热图矩阵。若需要画这个较大的 exact heatmap，在 QMD 的 YAML 里把 `render_exact_kmer_heatmap: true` 打开即可；exact k-mer 行只排序，不做层次聚类。
 - 即使没有安装 R 或 Quarto，Kite 仍然会正常输出所有 TSV 表。
 
 ### `kite citation`
@@ -328,13 +336,16 @@ R 端说明：
 | `--heatmap-kmeans` | `6` | 传给 `analyze` 的热图聚类数 | |
 | `--heatmap-seed` | `1` | 传给 `analyze` 的随机种子 | |
 | `--cluster-samples` | `true` | 传给 `analyze` 的样本聚类开关 | |
+| `--keep-intermediate` | `true` | 分析后是否保留 `databases/` 中间 `.kite` 文件 | 设为 `false` 时会在写出报告后删除 |
 | `-p, --progress` | `false` | 显示进度 | 会传给内部的 `count` 和 `analyze` |
 
 `fly` 的执行流程是：
 
 1. 对每个输入测序文件执行 `count`
 2. 对生成的 `.kite` 数据库执行 `analyze`
-3. 生成用于下游出图的 `analysis_report.qmd` 和分析结果
+3. 生成 `analysis_report.md`、`analysis_report.qmd` 和 `kite_flye_workflow_report.md`
+
+`kite_flye_workflow_report.md` 会记录 workflow 输入、各阶段输出、关键设置和耗时。使用 `--keep-intermediate false` 时，会先写出报告，再删除中间 `.kite` 文件。
 
 ## 安装方式
 

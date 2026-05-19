@@ -7,11 +7,13 @@ use anyhow::Context;
 use faer::Mat;
 use manifolds_rs::{pacmap, tsne, umap, PacmapParams, TsneParams, UmapParams};
 use nalgebra::{DMatrix, SymmetricEigen};
+use rayon::{prelude::*, ThreadPoolBuilder};
 
 use crate::cli::{AnalyzeArgs, CorrelationMode, EmbeddingMode};
 use crate::kiteops::{
-    apply_reader_filter_to_rows, ensure_compatible, for_each_union_row, format_reader_filter,
-    infer_sample_labels, key_to_string, load_partition_counts, open_readers, PartitionProgress,
+    apply_reader_filter_to_rows, ensure_compatible_with_paths, for_each_union_row,
+    fill_key_buffer, format_reader_filter, infer_sample_labels, load_partition_counts,
+    open_readers, PartitionProgress,
 };
 use crate::stats::print_simple_test_report;
 
@@ -146,6 +148,19 @@ impl PearsonAccumulator {
     fn write_tsv(&self, labels: &[String], path: &Path) -> anyhow::Result<()> {
         write_square_matrix(labels, path, |i, j, n| self.correlation(i, j, n))
     }
+
+    fn merge_from(&mut self, other: &Self) {
+        self.rows += other.rows;
+        for (left, right) in self.sums.iter_mut().zip(other.sums.iter()) {
+            *left += right;
+        }
+        for (left, right) in self.sumsq.iter_mut().zip(other.sumsq.iter()) {
+            *left += right;
+        }
+        for (left, right) in self.cross.iter_mut().zip(other.cross.iter()) {
+            *left += right;
+        }
+    }
 }
 
 struct CosineAccumulator {
@@ -182,6 +197,15 @@ impl CosineAccumulator {
 
     fn write_tsv(&self, labels: &[String], path: &Path) -> anyhow::Result<()> {
         write_square_matrix(labels, path, |i, j, n| self.correlation(i, j, n))
+    }
+
+    fn merge_from(&mut self, other: &Self) {
+        for (left, right) in self.sumsq.iter_mut().zip(other.sumsq.iter()) {
+            *left += right;
+        }
+        for (left, right) in self.cross.iter_mut().zip(other.cross.iter()) {
+            *left += right;
+        }
     }
 }
 
@@ -240,6 +264,26 @@ impl DistanceAccumulator {
         path: &Path,
     ) -> anyhow::Result<()> {
         write_square_matrix(labels, path, |i, j, n| self.value(method, i, j, n))
+    }
+
+    fn merge_from(&mut self, other: &Self) {
+        for (left, right) in self
+            .euclidean_sumsq
+            .iter_mut()
+            .zip(other.euclidean_sumsq.iter())
+        {
+            *left += right;
+        }
+        for (left, right) in self.manhattan_sum.iter_mut().zip(other.manhattan_sum.iter()) {
+            *left += right;
+        }
+        for (left, right) in self
+            .mahalanobis_diag_sumsq
+            .iter_mut()
+            .zip(other.mahalanobis_diag_sumsq.iter())
+        {
+            *left += right;
+        }
     }
 }
 
@@ -403,8 +447,10 @@ fn selected_embedding_methods(mode: EmbeddingMode) -> Vec<EmbeddingMethod> {
     }
 }
 
-fn transformed_values(counts: &[u64]) -> Vec<f64> {
-    counts.iter().map(|count| (*count as f64).ln_1p()).collect()
+fn fill_transformed_values(counts: &[u64], out: &mut [f64]) {
+    for (dst, count) in out.iter_mut().zip(counts.iter()) {
+        *dst = (*count as f64).ln_1p();
+    }
 }
 
 fn row_zscore(values: &[f64]) -> Vec<f64> {
@@ -422,6 +468,26 @@ fn row_zscore(values: &[f64]) -> Vec<f64> {
         values.iter().map(|value| (*value - mean) / sd).collect()
     } else {
         vec![0.0; values.len()]
+    }
+}
+
+fn fill_row_zscore(values: &[f64], out: &mut [f64]) {
+    let mean = values.iter().sum::<f64>() / values.len().max(1) as f64;
+    let var = values
+        .iter()
+        .map(|value| {
+            let delta = *value - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / values.len().max(1) as f64;
+    let sd = var.sqrt();
+    if sd > 0.0 {
+        for (dst, value) in out.iter_mut().zip(values.iter()) {
+            *dst = (*value - mean) / sd;
+        }
+    } else {
+        out.fill(0.0);
     }
 }
 
@@ -458,14 +524,56 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
         args.output_dir
     );
     let readers = open_readers(&args.inputs)?;
-    for (label, reader) in labels.iter().zip(readers.iter()) {
+    eprintln!(
+        "[kite analyze] labels={} ({})",
+        labels.join(","),
+        if args.labels.is_some() {
+            "user supplied"
+        } else {
+            "inferred from file names"
+        }
+    );
+    for (index, ((path, label), reader)) in args
+        .inputs
+        .iter()
+        .zip(labels.iter())
+        .zip(readers.iter())
+        .enumerate()
+    {
         eprintln!(
-            "[kite analyze] input {} filters: {}",
+            "[kite analyze] input #{:>2} label={} path={} k={} canonical={} partitions={} key_width={} rows={} chunks={} filters: {}",
+            index + 1,
             label,
+            path,
+            reader.header.k,
+            reader.header.canonical != 0,
+            reader.header.partitions,
+            reader.header.key_width,
+            reader.header.total_rows,
+            reader.total_chunks,
             format_reader_filter(reader)
         );
     }
-    let meta = ensure_compatible(&readers)?;
+    let meta = ensure_compatible_with_paths(&readers, &args.inputs)?;
+    let worker_threads = if args.threads == 0 {
+        num_cpus::get().max(1)
+    } else {
+        args.threads.max(1)
+    };
+    eprintln!(
+        "[kite analyze] worker_threads={} (parallel partition prefetch in batches)",
+        worker_threads
+    );
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(worker_threads)
+        .thread_name(|index| format!("kite-analyze-{index}"))
+        .build()
+        .ok();
+    if pool.is_none() && worker_threads > 1 {
+        eprintln!(
+            "[kite analyze] failed to create local worker pool; falling back to serial partition processing"
+        );
+    }
     let out_dir = Path::new(&args.output_dir);
 
     let matrix_path = out_dir.join("exact_count_matrix.tsv");
@@ -475,6 +583,7 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     let heatmap_clusters_path = out_dir.join("heatmap_clusters.tsv");
     let heatmap_samples_path = out_dir.join("heatmap_samples.tsv");
     let quarto_path = out_dir.join("analysis_report.qmd");
+    let markdown_report_path = out_dir.join("analysis_report.md");
     let correlation_methods = selected_correlation_methods(args.correlation);
     let embedding_methods = selected_embedding_methods(args.embedding);
     let needs_spearman = correlation_methods.contains(&CorrelationMethod::Spearman);
@@ -507,55 +616,93 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     let mut distances = needs_distances.then(|| DistanceAccumulator::new(labels.len()));
     let mut spearman_columns =
         needs_spearman.then(|| (0..labels.len()).map(|_| Vec::new()).collect::<Vec<_>>());
-    let mut embedding_rows: Vec<Vec<f64>> = Vec::new();
+    let mut embedding_rows: Vec<f64> = Vec::new();
     let mut heatmap = OnlineHeatmap::new(args.heatmap_kmeans);
-    let mut heatmap_plot_rows: Vec<(String, usize, Vec<f64>)> =
-        Vec::with_capacity(HEATMAP_PLOT_MAX_ROWS as usize);
     let mut rows_written = 0u64;
+    let sample_count = labels.len();
 
     let progress = PartitionProgress::new("analyze", args.progress, meta.partitions, started);
-    for partition_id in 0..meta.partitions {
-        let mut vectors = Vec::with_capacity(readers.len());
-        for reader in &readers {
-            let mut rows = load_partition_counts(reader, partition_id)?;
-            apply_reader_filter_to_rows(reader, &mut rows);
-            vectors.push(rows);
-        }
-        for_each_union_row(&vectors, |key, row| {
-            let kmer = key_to_string(key, &meta);
-            write!(matrix, "{}", kmer)?;
-            for (index, count) in row.iter().enumerate() {
-                write!(matrix, "\t{}", count)?;
-                sample_totals[index] = sample_totals[index].saturating_add(*count);
-                if *count > 0 {
-                    sample_nonzero[index] += 1;
+    let batch_size = worker_threads.max(1);
+    for batch_start in (0..meta.partitions).step_by(batch_size) {
+        let batch_end = (batch_start + batch_size).min(meta.partitions);
+        let batch_ids = (batch_start..batch_end).collect::<Vec<_>>();
+        let mut batch_chunks = if let Some(pool) = &pool {
+            pool.install(|| {
+                batch_ids
+                    .into_par_iter()
+                    .map(|partition_id| {
+                        build_analyze_partition_chunk(
+                            &readers,
+                            &meta,
+                            partition_id,
+                            sample_count,
+                            needs_spearman,
+                            needs_dense_embedding,
+                            needs_distances,
+                        )
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })?
+        } else {
+            batch_ids
+                .into_iter()
+                .map(|partition_id| {
+                    build_analyze_partition_chunk(
+                        &readers,
+                        &meta,
+                        partition_id,
+                        sample_count,
+                        needs_spearman,
+                        needs_dense_embedding,
+                        needs_distances,
+                    )
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?
+        };
+        batch_chunks.sort_by_key(|chunk| chunk.partition_id);
+        for chunk in batch_chunks {
+            matrix.write_all(&chunk.matrix_buf)?;
+            pearson.merge_from(&chunk.pearson);
+            cosine.merge_from(&chunk.cosine);
+            if let (Some(global), Some(local)) = (distances.as_mut(), chunk.distances.as_ref()) {
+                global.merge_from(local);
+            }
+            for (left, right) in sample_totals.iter_mut().zip(chunk.sample_totals.iter()) {
+                *left = left.saturating_add(*right);
+            }
+            for (left, right) in sample_nonzero.iter_mut().zip(chunk.sample_nonzero.iter()) {
+                *left = left.saturating_add(*right);
+            }
+            if let (Some(global), Some(local)) = (spearman_columns.as_mut(), chunk.spearman_columns)
+            {
+                for (dst, src) in global.iter_mut().zip(local.into_iter()) {
+                    dst.extend(src);
                 }
             }
-            writeln!(matrix)?;
-
-            let values = transformed_values(row);
-            pearson.update(&values);
-            cosine.update(&values);
-            if let Some(distances) = distances.as_mut() {
-                distances.update(&values);
-            }
-            if let Some(columns) = spearman_columns.as_mut() {
-                push_columns(columns, &values);
-            }
             if needs_dense_embedding {
-                embedding_rows.push(values.clone());
+                embedding_rows.extend_from_slice(&chunk.embedding_values);
             }
-            let cluster = heatmap.assign(&values);
-            let scaled = row_zscore(&values);
-            write_heatmap_row(&mut heatmap_matrix, &kmer, cluster, &scaled)?;
-            if rows_written < HEATMAP_PLOT_MAX_ROWS {
-                write_heatmap_row(&mut heatmap_plot_matrix, &kmer, cluster, &scaled)?;
-                heatmap_plot_rows.push((kmer, cluster, scaled));
+            let mut heatmap_buf = Vec::with_capacity(chunk.row_count * (sample_count * 12 + 32));
+            let mut plot_buf = Vec::new();
+            for row_index in 0..chunk.row_count {
+                let offset = row_index * sample_count;
+                let values = &chunk.transformed_values[offset..offset + sample_count];
+                let scaled = &chunk.scaled_values[offset..offset + sample_count];
+                let cluster = heatmap.assign(values);
+                let kmer_start = row_index * chunk.kmer_width;
+                let kmer = &chunk.kmers[kmer_start..kmer_start + chunk.kmer_width];
+                write_heatmap_row(&mut heatmap_buf, kmer, cluster, scaled)?;
+                if rows_written < HEATMAP_PLOT_MAX_ROWS {
+                    write_heatmap_row(&mut plot_buf, kmer, cluster, scaled)?;
+                }
+                rows_written += 1;
             }
-            rows_written += 1;
-            Ok(())
-        })?;
-        progress.update(partition_id + 1);
+            heatmap_matrix.write_all(&heatmap_buf)?;
+            if !plot_buf.is_empty() {
+                heatmap_plot_matrix.write_all(&plot_buf)?;
+            }
+            progress.update(chunk.partition_id + 1);
+        }
     }
     progress.finish();
     matrix.flush()?;
@@ -612,8 +759,14 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
         let scores = match method {
             EmbeddingMethod::Pca => pca_scores.clone(),
             EmbeddingMethod::Tsne | EmbeddingMethod::Umap | EmbeddingMethod::Pacmap => {
-                manifold_embedding(&embedding_rows, labels.len(), *method, args.heatmap_seed)
-                    .with_context(|| format!("failed to compute {} embedding", method.slug()))?
+                manifold_embedding(
+                    &embedding_rows,
+                    rows_written as usize,
+                    labels.len(),
+                    *method,
+                    args.heatmap_seed,
+                )
+                .with_context(|| format!("failed to compute {} embedding", method.slug()))?
             }
         };
         write_embedding_table(&labels, &scores, *method, &path)?;
@@ -640,6 +793,17 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
             args.cluster_samples,
         ),
     )?;
+    write_analysis_markdown_report(
+        &markdown_report_path,
+        args,
+        &labels,
+        &readers,
+        rows_written,
+        worker_threads,
+        &correlation_methods,
+        &embedding_methods,
+        started.elapsed().as_secs_f64(),
+    )?;
 
     let correlation_labels = correlation_methods
         .iter()
@@ -647,7 +811,7 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
         .collect::<Vec<_>>()
         .join(", ");
     eprintln!(
-        "[kite analyze] wrote matrix, {} correlation table(s), {} embedding table(s), heatmap tables, and Quarto report in {:.3}s",
+        "[kite analyze] wrote matrix, {} correlation table(s), {} embedding table(s), heatmap tables, Quarto report, and Markdown report in {:.3}s",
         correlation_labels,
         embedding_methods.len(),
         started.elapsed().as_secs_f64()
@@ -658,6 +822,8 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
             &[
                 ("inputs", args.inputs.len().to_string()),
                 ("labels", labels.join(",")),
+                ("threads", args.threads.to_string()),
+                ("worker_threads", worker_threads.to_string()),
                 ("partitions", meta.partitions.to_string()),
                 ("matrix_rows", rows_written.to_string()),
                 (
@@ -672,6 +838,10 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
                     rows_written.min(HEATMAP_PLOT_MAX_ROWS).to_string(),
                 ),
                 ("output_dir", args.output_dir.clone()),
+                (
+                    "markdown_report",
+                    markdown_report_path.display().to_string(),
+                ),
             ],
             started.elapsed(),
         );
@@ -679,15 +849,147 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn write_heatmap_row<W: Write>(
-    out: &mut W,
-    kmer: &str,
-    cluster: usize,
-    scaled: &[f64],
+fn write_analysis_markdown_report(
+    path: &Path,
+    args: &AnalyzeArgs,
+    labels: &[String],
+    readers: &[std::sync::Arc<crate::dump::reader::KiteReader>],
+    rows_written: u64,
+    worker_threads: usize,
+    correlation_methods: &[CorrelationMethod],
+    embedding_methods: &[EmbeddingMethod],
+    elapsed_secs: f64,
 ) -> anyhow::Result<()> {
-    write!(out, "{}\t{}", kmer, cluster)?;
+    let mut out = BufWriter::new(File::create(path)?);
+    writeln!(out, "# Kite Analyze Report")?;
+    writeln!(out)?;
+    writeln!(out, "## Summary")?;
+    writeln!(out)?;
+    writeln!(out, "| Field | Value |")?;
+    writeln!(out, "|---|---:|")?;
+    writeln!(out, "| Inputs | {} |", args.inputs.len())?;
+    writeln!(out, "| Matrix rows | {} |", rows_written)?;
+    writeln!(out, "| Threads requested | {} |", args.threads)?;
+    writeln!(out, "| Worker threads used | {} |", worker_threads)?;
+    writeln!(out, "| Heatmap clusters | {} |", args.heatmap_kmeans)?;
+    writeln!(out, "| Cluster samples | {} |", args.cluster_samples)?;
+    writeln!(out, "| Elapsed seconds | {:.3} |", elapsed_secs)?;
+    writeln!(out)?;
+    writeln!(out, "## Methods")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "- Correlation/distance: {}",
+        correlation_methods
+            .iter()
+            .map(|method| method.display_name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )?;
+    writeln!(
+        out,
+        "- Embedding: {}",
+        embedding_methods
+            .iter()
+            .map(|method| method.slug())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )?;
+    writeln!(out, "- Count transform: `log1p(raw_count)`.")?;
+    writeln!(
+        out,
+        "- Mahalanobis mode, when selected, uses a streaming diagonal covariance approximation."
+    )?;
+    writeln!(out)?;
+    writeln!(out, "## Inputs")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "| # | Label | Path | k | Canonical | Partitions | Key width | Rows | Chunks | Min | Max |"
+    )?;
+    writeln!(
+        out,
+        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+    )?;
+    for (index, ((input, label), reader)) in args
+        .inputs
+        .iter()
+        .zip(labels.iter())
+        .zip(readers.iter())
+        .enumerate()
+    {
+        writeln!(
+            out,
+            "| {} | {} | `{}` | {} | {} | {} | {} | {} | {} | {} | {} |",
+            index + 1,
+            label,
+            input,
+            reader.header.k,
+            reader.header.canonical != 0,
+            reader.header.partitions,
+            reader.header.key_width,
+            reader.header.total_rows,
+            reader.total_chunks,
+            crate::kiteops::format_count_filter(reader.header.min_count),
+            crate::kiteops::format_count_filter(reader.header.max_count),
+        )?;
+    }
+    writeln!(out)?;
+    writeln!(out, "## Output Files")?;
+    writeln!(out)?;
+    writeln!(out, "| File | Size bytes |")?;
+    writeln!(out, "|---|---:|")?;
+    for name in [
+        "exact_count_matrix.tsv",
+        "sample_summary.tsv",
+        "heatmap_matrix.tsv",
+        "heatmap_plot_matrix.tsv",
+        "heatmap_clusters.tsv",
+        "heatmap_samples.tsv",
+        "analysis_report.qmd",
+    ] {
+        let file_path = Path::new(&args.output_dir).join(name);
+        let size = std::fs::metadata(&file_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        writeln!(out, "| `{}` | {} |", name, size)?;
+    }
+    for method in correlation_methods {
+        let name = format!("correlation_{}.tsv", method.slug());
+        let file_path = Path::new(&args.output_dir).join(&name);
+        let size = std::fs::metadata(&file_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        writeln!(out, "| `{}` | {} |", name, size)?;
+    }
+    for method in embedding_methods {
+        let name = format!("embedding_{}.tsv", method.slug());
+        let file_path = Path::new(&args.output_dir).join(&name);
+        let size = std::fs::metadata(&file_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        writeln!(out, "| `{}` | {} |", name, size)?;
+    }
+    writeln!(out)?;
+    writeln!(out, "This report: `{}`", path.display())?;
+    out.flush()?;
+    Ok(())
+}
+
+fn write_heatmap_row<W: Write>(out: &mut W, kmer: &[u8], cluster: usize, scaled: &[f64]) -> anyhow::Result<()> {
+    out.write_all(kmer)?;
+    write!(out, "\t{}", cluster)?;
     for value in scaled {
         write!(out, "\t{:.8}", value)?;
+    }
+    writeln!(out)?;
+    Ok(())
+}
+
+fn append_exact_matrix_row<W: Write>(out: &mut W, kmer: &[u8], counts: &[u64]) -> anyhow::Result<()> {
+    out.write_all(kmer)?;
+    for count in counts {
+        write!(out, "\t{}", count)?;
     }
     writeln!(out)?;
     Ok(())
@@ -769,7 +1071,8 @@ fn pca_scores(cov: &[f64], n: usize, dims: usize) -> Vec<Vec<f64>> {
 }
 
 fn manifold_embedding(
-    feature_rows: &[Vec<f64>],
+    feature_rows: &[f64],
+    features: usize,
     samples: usize,
     method: EmbeddingMethod,
     seed: u64,
@@ -777,16 +1080,15 @@ fn manifold_embedding(
     if samples == 0 {
         return Ok(Vec::new());
     }
-    if samples < 4 || feature_rows.is_empty() {
+    if samples < 4 || feature_rows.is_empty() || features == 0 {
         eprintln!(
             "[kite analyze] {} needs at least 4 samples and non-empty features; writing zero coordinates",
             method.slug()
         );
         return Ok(vec![vec![0.0; 2]; samples]);
     }
-    let features = feature_rows.len();
     let matrix = Mat::from_fn(samples, features, |sample, feature| {
-        feature_rows[feature][sample]
+        feature_rows[feature * samples + sample]
     });
     let seed = seed as usize;
     let embedding = match method {
@@ -879,6 +1181,101 @@ fn write_embedding_table(
     Ok(())
 }
 
+struct PartitionAnalyzeChunk {
+    partition_id: usize,
+    kmers: Vec<u8>,
+    kmer_width: usize,
+    matrix_buf: Vec<u8>,
+    sample_totals: Vec<u64>,
+    sample_nonzero: Vec<u64>,
+    pearson: PearsonAccumulator,
+    cosine: CosineAccumulator,
+    distances: Option<DistanceAccumulator>,
+    spearman_columns: Option<Vec<Vec<f64>>>,
+    embedding_values: Vec<f64>,
+    transformed_values: Vec<f64>,
+    scaled_values: Vec<f64>,
+    row_count: usize,
+}
+
+fn build_analyze_partition_chunk(
+    readers: &[std::sync::Arc<crate::dump::reader::KiteReader>],
+    meta: &crate::kiteops::CompatibleMetadata,
+    partition_id: usize,
+    sample_count: usize,
+    needs_spearman: bool,
+    needs_dense_embedding: bool,
+    needs_distances: bool,
+) -> anyhow::Result<PartitionAnalyzeChunk> {
+    let mut vectors = Vec::with_capacity(readers.len());
+    for reader in readers {
+        let mut rows = load_partition_counts(reader, partition_id)?;
+        apply_reader_filter_to_rows(reader, &mut rows);
+        vectors.push(rows);
+    }
+    let row_count_estimate: usize = vectors.iter().map(Vec::len).sum();
+    let kmer_width = meta.k as usize;
+    let mut kmers = Vec::with_capacity(row_count_estimate * kmer_width);
+    let mut matrix_buf = Vec::with_capacity(row_count_estimate * (sample_count * 8 + 32));
+    let mut sample_totals = vec![0u64; sample_count];
+    let mut sample_nonzero = vec![0u64; sample_count];
+    let mut pearson = PearsonAccumulator::new(sample_count);
+    let mut cosine = CosineAccumulator::new(sample_count);
+    let mut distances = needs_distances.then(|| DistanceAccumulator::new(sample_count));
+    let mut spearman_columns =
+        needs_spearman.then(|| (0..sample_count).map(|_| Vec::new()).collect::<Vec<_>>());
+    let mut embedding_values = Vec::new();
+    let mut transformed_values = Vec::with_capacity(row_count_estimate * sample_count);
+    let mut scaled_values = Vec::with_capacity(row_count_estimate * sample_count);
+    let mut values = vec![0.0; sample_count];
+    let mut scaled = vec![0.0; sample_count];
+    let mut kmer_buf = vec![0u8; kmer_width];
+    for_each_union_row(&vectors, |key, row| {
+        fill_key_buffer(key, meta, &mut kmer_buf);
+        append_exact_matrix_row(&mut matrix_buf, &kmer_buf, row)?;
+        kmers.extend_from_slice(&kmer_buf);
+        for (index, count) in row.iter().enumerate() {
+            sample_totals[index] = sample_totals[index].saturating_add(*count);
+            if *count > 0 {
+                sample_nonzero[index] += 1;
+            }
+        }
+        fill_transformed_values(row, &mut values);
+        pearson.update(&values);
+        cosine.update(&values);
+        if let Some(distances) = distances.as_mut() {
+            distances.update(&values);
+        }
+        if let Some(columns) = spearman_columns.as_mut() {
+            push_columns(columns, &values);
+        }
+        if needs_dense_embedding {
+            embedding_values.extend(values.iter().copied());
+        }
+        transformed_values.extend(values.iter().copied());
+        fill_row_zscore(&values, &mut scaled);
+        scaled_values.extend(scaled.iter().copied());
+        Ok(())
+    })?;
+    let row_count = kmers.len() / kmer_width.max(1);
+    Ok(PartitionAnalyzeChunk {
+        partition_id,
+        kmers,
+        kmer_width,
+        matrix_buf,
+        sample_totals,
+        sample_nonzero,
+        pearson,
+        cosine,
+        distances,
+        spearman_columns,
+        embedding_values,
+        transformed_values,
+        scaled_values,
+        row_count,
+    })
+}
+
 fn render_quarto_document(
     labels: &[String],
     correlation_methods: &[CorrelationMethod],
@@ -905,17 +1302,37 @@ fn render_quarto_document(
         r##"---
 title: "Kite Analyze Report"
 subtitle: "TSV-first k-mer comparison workflow"
+
 format:
   html:
     toc: true
     toc-depth: 3
+    toc-location: left
+    section-divs: true
     code-fold: false
     code-tools: true
-    theme: cosmo
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+    page-layout: full
+    theme:
+      light: default
+      dark: darkly
+
+  pdf:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    colorlinks: true
+    geometry:
+      - margin=0.8in
+
 execute:
   echo: true
   warning: false
   message: false
+
 params:
   output_dir: "."
   samples: [{label_list}]
@@ -923,11 +1340,14 @@ params:
   embedding_tables: "{embedding_list}"
   heatmap_kmeans: {heatmap_kmeans}
   cluster_samples: {cluster_samples}
+  render_exact_kmer_heatmap: false
+  exact_heatmap_min_total_signal: 10
+  exact_heatmap_max_kmers: 2000
 ---
 
 # Kite analyze
 
-This notebook is generated by `kite analyze`. The command itself writes TSV tables only by default, so it does not block on R plotting. Render this document when you want publication-style figures from the generated tables.
+This notebook is generated by `kite analyze`. The command itself writes TSV tables only by default. Render this document with [quarto](https://quarto.org/) when you want publication-style figures.
 
 ## Runtime requirements
 
@@ -944,8 +1364,6 @@ Recommended minimums for this notebook:
 | scales | 1.4.0 |
 | ComplexHeatmap | 2.18.0 |
 | circlize | 0.4.16 |
-
-The code uses modern base R pipes (`|>`), tidy reshaping with `tidyr::pivot_longer()`, and ComplexHeatmap for the default heatmap. ComplexHeatmap is installed from Bioconductor when needed.
 
 ```{{r}}
 cran_packages <- c(
@@ -966,28 +1384,46 @@ if (getRversion() < "4.3.0") {{
   stop("This notebook expects R >= 4.3.0; detected ", getRversion())
 }}
 
+if (!requireNamespace("pak", quietly = TRUE)) {{
+  install.packages("pak", repos = "https://cloud.r-project.org")
+}}
+
 is_missing_or_old <- function(pkg, min_version) {{
   !requireNamespace(pkg, quietly = TRUE) ||
-    utils::compareVersion(as.character(utils::packageVersion(pkg)), min_version) < 0
+    utils::compareVersion(
+      as.character(utils::packageVersion(pkg)),
+      min_version
+    ) < 0
 }}
 
-to_install <- names(cran_packages)[
-  vapply(names(cran_packages), \(pkg) is_missing_or_old(pkg, cran_packages[[pkg]]), logical(1))
+cran_to_install <- names(cran_packages)[
+  vapply(
+    names(cran_packages),
+    function(pkg) is_missing_or_old(pkg, cran_packages[[pkg]]),
+    logical(1)
+  )
 ]
-
-if (length(to_install) > 0) {{
-  install.packages(to_install, repos = "https://cloud.r-project.org")
-}}
 
 bioc_to_install <- names(bioc_packages)[
-  vapply(names(bioc_packages), \(pkg) is_missing_or_old(pkg, bioc_packages[[pkg]]), logical(1))
+  vapply(
+    names(bioc_packages),
+    function(pkg) is_missing_or_old(pkg, bioc_packages[[pkg]]),
+    logical(1)
+  )
 ]
 
+if (length(cran_to_install) > 0) {{
+  message("Installing CRAN packages: ", paste(cran_to_install, collapse = ", "))
+  pak::pkg_install(cran_to_install)
+}} else {{
+  message("All CRAN packages are available.")
+}}
+
 if (length(bioc_to_install) > 0) {{
-  if (!requireNamespace("BiocManager", quietly = TRUE)) {{
-    install.packages("BiocManager", repos = "https://cloud.r-project.org")
-  }}
-  BiocManager::install(bioc_to_install, ask = FALSE, update = FALSE)
+  message("Installing Bioconductor packages: ", paste(bioc_to_install, collapse = ", "))
+  pak::pkg_install(paste0("bioc::", bioc_to_install))
+}} else {{
+  message("All Bioconductor packages are available.")
 }}
 ```
 
@@ -1023,31 +1459,174 @@ save_plot <- function(plot, filename, width = 8, height = 6, dpi = 320, bg = "wh
   )
 }}
 
+save_heatmap <- function(ht, filename, width = 9, height = 6, dpi = 320) {{
+  png(file.path(out_dir, filename), width = width, height = height, units = "in", res = dpi)
+  ComplexHeatmap::draw(ht, heatmap_legend_side = "right")
+  dev.off()
+
+  pdf(file.path(out_dir, sub("\\.png$", ".pdf", filename)), width = width, height = height)
+  ComplexHeatmap::draw(ht, heatmap_legend_side = "right")
+  dev.off()
+}}
+
 kite_theme <- function(base_size = 12) {{
-  theme_minimal(base_size = base_size) +
+  theme_bw(base_size = base_size, base_family = "sans") +
     theme(
-      text = element_text(family = "sans"),
+      text = element_text(family = "sans", color = "#000000"),
+
       plot.title.position = "plot",
-      plot.title = element_text(face = "bold", size = rel(1.15), margin = margin(b = 8)),
-      panel.grid = element_blank(),
-      axis.title = element_text(color = "#333333"),
-      axis.text = element_text(color = "#333333")
+      plot.title = element_text(
+        family = "sans",
+        face = "bold",
+        size = rel(1.15),
+        hjust = 0.5,
+        color = "#000000",
+        margin = margin(b = 8)
+      ),
+      plot.subtitle = element_text(
+        family = "sans",
+        color = "#000000",
+        hjust = 0.5
+      ),
+      plot.caption = element_text(
+        family = "sans",
+        color = "#000000"
+      ),
+
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+
+      panel.border = element_rect(
+        color = "#000000",
+        fill = NA,
+        linewidth = 0.35
+      ),
+
+      axis.line = element_blank(),
+      axis.title = element_text(
+        family = "sans",
+        color = "#000000"
+      ),
+      axis.text = element_text(
+        family = "sans",
+        color = "#000000"
+      ),
+      axis.ticks = element_line(
+        color = "#000000",
+        linewidth = 0.3
+      ),
+      axis.ticks.length = unit(2, "pt"),
+
+      legend.title = element_text(
+        family = "sans",
+        color = "#000000"
+      ),
+      legend.text = element_text(
+        family = "sans",
+        color = "#000000"
+      ),
+      legend.key = element_rect(fill = "transparent", color = NA),
+      legend.background = element_rect(fill = "transparent", color = NA),
+      legend.box.background = element_rect(fill = "transparent", color = NA),
+
+      strip.text = element_text(
+        family = "sans",
+        color = "#000000",
+        face = "bold"
+      ),
+      strip.background = element_rect(
+        fill = "transparent",
+        color = "#000000",
+        linewidth = 0.35
+      ),
+
+      plot.background = element_rect(fill = "transparent", color = NA),
+      panel.background = element_rect(fill = "transparent", color = NA)
     )
 }}
 
 short_number <- scales::label_number(scale_cut = scales::cut_short_scale())
 ```
 
+## Output figure sizes
+
+The report saves each figure separately with fixed dimensions so the rendered
+report can be used without manual resizing.
+
+| Figure | File | Size |
+|---|---|---:|
+| Sample summary | `sample_summary.png/pdf` | 8 x 5 in |
+| Correlation/distance heatmaps | `correlation_*.png/pdf` | 7.5 x 6.5 in |
+| Embeddings | `embedding_*.png/pdf` | 7 x 5.5 in |
+| Cluster representative heatmap | `heatmap_cluster_representatives.png/pdf` | 9 x 6 in |
+| Optional exact k-mer heatmap | `heatmap_exact_filtered.png/pdf` | 9 x 8 in |
+
 # Input tables
 
 `exact_count_matrix.tsv` contains raw exact k-mer counts by sample. This file can be very large, so most plotting below uses summary tables instead.
 
 ```{{r}}
-sample_summary <- read_kite_tsv("sample_summary.tsv")
-sample_summary
+expected_tables <- c(
+  "exact_count_matrix.tsv",
+  "sample_summary.tsv",
+  "heatmap_matrix.tsv",
+  "heatmap_plot_matrix.tsv",
+  "heatmap_clusters.tsv",
+  "heatmap_samples.tsv"
+)
+
+table_inventory <- data.frame(
+  file = basename(Sys.glob(file.path(out_dir, "*.tsv"))),
+  stringsAsFactors = FALSE
+) |>
+  dplyr::mutate(
+    path = file.path(out_dir, file),
+    size_mb = round(file.info(path)$size / 1024^2, 3),
+    role = dplyr::case_when(
+      file == "exact_count_matrix.tsv" ~ "raw exact k-mer matrix",
+      file == "sample_summary.tsv" ~ "sample totals and nonzero rows",
+      file == "heatmap_matrix.tsv" ~ "all row-scaled k-mers for optional exact heatmap",
+      file == "heatmap_plot_matrix.tsv" ~ "small row-scaled matrix used for quick plotting",
+      file == "heatmap_clusters.tsv" ~ "cluster representative heatmap matrix",
+      file == "heatmap_samples.tsv" ~ "sample order for heatmaps",
+      grepl("^correlation_", file) ~ "correlation or distance matrix",
+      grepl("^embedding_", file) ~ "sample embedding coordinates",
+      TRUE ~ "other"
+    )
+  ) |>
+  dplyr::select(file, role, size_mb)
+
+missing_tables <- setdiff(expected_tables, table_inventory$file)
+if (length(missing_tables) > 0) {{
+  warning("Missing expected Kite analyze table(s): ", paste(missing_tables, collapse = ", "))
+}}
+
+table_inventory
 ```
 
-## Sample summary plot
+```{{r}}
+sample_summary <- read_kite_tsv("sample_summary.tsv")
+heatmap_sample_order <- read_kite_tsv("heatmap_samples.tsv")
+sample_overview <- sample_summary |>
+  dplyr::left_join(heatmap_sample_order, by = "sample") |>
+  dplyr::arrange(order)
+
+sample_overview
+```
+
+## Sample information
+
+```{{r}}
+sample_overview |>
+  dplyr::summarise(
+    samples = dplyr::n(),
+    total_raw_counts = sum(total_raw_counts),
+    median_raw_counts = median(total_raw_counts),
+    median_nonzero_kmers = median(nonzero_kmers)
+  )
+```
+
+## Sample summary plots
 
 ```{{r}}
 p_summary <- ggplot(sample_summary, aes(sample, total_raw_counts)) +
@@ -1057,11 +1636,21 @@ p_summary <- ggplot(sample_summary, aes(sample, total_raw_counts)) +
   kite_theme(base_size = 12) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-p_summary
+p_nonzero <- ggplot(sample_summary, aes(sample, nonzero_kmers)) +
+  geom_col(fill = "#59A14F", width = 0.72) +
+  scale_y_continuous(labels = short_number) +
+  labs(x = NULL, y = "Nonzero k-mers", title = "Nonzero k-mers per sample") +
+  kite_theme(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_summary / p_nonzero
 ```
 
 ```{{r}}
 save_plot(p_summary, "sample_summary.png", width = 8, height = 5)
+save_plot(p_summary, "sample_summary.pdf", width = 8, height = 5)
+save_plot(p_nonzero, "sample_nonzero_kmers.png", width = 8, height = 5)
+save_plot(p_nonzero, "sample_nonzero_kmers.pdf", width = 8, height = 5)
 ```
 
 # Correlation
@@ -1069,10 +1658,22 @@ save_plot(p_summary, "sample_summary.png", width = 8, height = 5)
 The generated correlation and distance tables are: `{correlation_list}`. The default command writes only `correlation_pearson.tsv`; use `--correlation all` or a specific method to write additional tables.
 
 ```{{r}}
-plot_correlation <- function(name, palette_low = "#2166AC", palette_high = "#B2182B") {{
+plot_correlation <- function(
+  name,
+  distance_option = "magma",
+  label_digits = 2,
+  label_size = 3
+) {{
   df <- read_kite_tsv(name)
+
   labels <- colnames(df)[-1]
-  is_distance <- grepl("euclidean|manhattan|mahalanobis", name)
+
+  is_distance <- grepl(
+    "euclidean|manhattan|mahalanobis",
+    name,
+    ignore.case = TRUE
+  )
+
   long <- df |>
     tidyr::pivot_longer(
       cols = -sample,
@@ -1081,36 +1682,79 @@ plot_correlation <- function(name, palette_low = "#2166AC", palette_high = "#B21
     ) |>
     dplyr::mutate(
       sample_x = factor(sample_x, levels = labels),
-      sample_y = factor(sample, levels = rev(labels))
+      sample_y = factor(sample, levels = rev(labels)),
+      label = sprintf(paste0("%.", label_digits, "f"), value)
     )
+
   p <- ggplot(long, aes(sample_x, sample_y, fill = value)) +
-    geom_tile(color = "white", linewidth = 0.25) +
+    geom_tile(
+      color = "white",
+      linewidth = 0.4
+    ) +
+    geom_text(
+      aes(label = label),
+      family = "sans",
+      size = label_size,
+      color = "#000000"
+    ) +
     coord_equal() +
-    labs(x = NULL, y = NULL, fill = ifelse(is_distance, "distance", "correlation"), title = sub("\\\\.tsv$", "", name)) +
+    labs(
+      x = NULL,
+      y = NULL,
+      fill = ifelse(is_distance, "distance", "correlation"),
+      title = sub("\\.tsv$", "", name)
+    ) +
     kite_theme(base_size = 12) +
     theme(
-      axis.text.x = element_text(angle = 45, hjust = 1),
-      panel.grid = element_blank()
+      axis.text.x = element_text(
+        angle = 45,
+        hjust = 1,
+        vjust = 1,
+        color = "#000000",
+        family = "sans"
+      ),
+      axis.text.y = element_text(
+        color = "#000000",
+        family = "sans"
+      ),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      legend.key = element_rect(fill = "transparent", color = NA),
+      legend.background = element_rect(fill = "transparent", color = NA),
+      legend.box.background = element_rect(fill = "transparent", color = NA)
     )
+
   if (is_distance) {{
-    p + scale_fill_viridis_c(option = "magma", direction = -1)
+    p +
+      scale_fill_viridis_c(
+        option = distance_option,
+        direction = -1,
+        oob = scales::squish
+      )
   }} else {{
-    p + scale_fill_gradient2(low = palette_low, mid = "white", high = palette_high,
-                             midpoint = 0, limits = c(-1, 1), oob = squish)
+    p +
+      scale_fill_gradient(
+        low = "#D6EAF8",   # light blue
+        high = "#FAD7A0",  # light orange
+        oob = scales::squish
+      )
   }}
 }}
 
 correlation_files <- Sys.glob(file.path(out_dir, "correlation_*.tsv"))
+
 correlation_plots <- setNames(
   lapply(basename(correlation_files), plot_correlation),
-  sub("\\\\.tsv$", "", basename(correlation_files))
+  sub("\\.tsv$", "", basename(correlation_files))
 )
+
 correlation_plots
 ```
 
 ```{{r}}
 for (name in names(correlation_plots)) {{
   save_plot(correlation_plots[[name]], paste0(name, ".png"), width = 7.5, height = 6.5)
+  save_plot(correlation_plots[[name]], paste0(name, ".pdf"), width = 7.5, height = 6.5)
 }}
 ```
 
@@ -1130,14 +1774,14 @@ plot_embedding <- function(name, point_size = 3.2, label_size = 3.4) {{
       size = label_size,
       color = "#333333"
     ) +
-    labs(x = "dim1", y = "dim2", title = sub("\\\\.tsv$", "", name)) +
+    labs(x = "dim1", y = "dim2", title = sub("\\.tsv$", "", name)) +
     kite_theme(base_size = 12)
 }}
 
 embedding_files <- Sys.glob(file.path(out_dir, "embedding_*.tsv"))
 embedding_plots <- setNames(
   lapply(basename(embedding_files), plot_embedding),
-  sub("\\\\.tsv$", "", basename(embedding_files))
+  sub("\\.tsv$", "", basename(embedding_files))
 )
 embedding_plots
 ```
@@ -1145,12 +1789,13 @@ embedding_plots
 ```{{r}}
 for (name in names(embedding_plots)) {{
   save_plot(embedding_plots[[name]], paste0(name, ".png"), width = 7, height = 5.5)
+  save_plot(embedding_plots[[name]], paste0(name, ".pdf"), width = 7, height = 5.5)
 }}
 ```
 
 # Heatmap
 
-The default heatmap uses `heatmap_clusters.tsv`, so it shows one representative row per k-mer cluster and renders quickly. The full k-mer matrix can be very large, so the optional exact k-mer heatmap below is disabled by default.
+The default heatmap uses `heatmap_clusters.tsv`, so it shows one representative row per k-mer cluster and renders quickly. Sample columns are clustered by default when `cluster_samples` is true, so the heatmap includes a sample dendrogram. K-mer rows are not hierarchically clustered; each row is a k-means cluster representative.
 
 ```{{r}}
 sample_order <- read_kite_tsv("heatmap_samples.tsv")
@@ -1175,6 +1820,8 @@ ht_cluster <- ComplexHeatmap::Heatmap(
   col = heatmap_col_fun,
   cluster_rows = FALSE,
   cluster_columns = params$cluster_samples,
+  show_column_dend = params$cluster_samples,
+  column_dend_height = grid::unit(24, "mm"),
   rect_gp = grid::gpar(col = NA),
   row_names_gp = grid::gpar(fontfamily = "sans", fontsize = 10),
   column_names_gp = grid::gpar(fontfamily = "sans", fontsize = 10),
@@ -1185,45 +1832,51 @@ ComplexHeatmap::draw(ht_cluster, heatmap_legend_side = "right")
 ```
 
 ```{{r}}
-png(file.path(out_dir, "heatmap_cluster_representatives.png"), width = 9, height = 6, units = "in", res = 320)
-ComplexHeatmap::draw(ht_cluster, heatmap_legend_side = "right")
-dev.off()
+save_heatmap(ht_cluster, "heatmap_cluster_representatives.png", width = 9, height = 6)
 ```
 
 ## Optional exact k-mer heatmap
 
-This chunk reads `exact_count_matrix.tsv`, filters out low-count k-mers, samples the strongest remaining rows, and then uses ComplexHeatmap clustering. It is disabled by default because it can be expensive on large datasets.
+`kite analyze` writes `heatmap_matrix.tsv`, where each row is one exact k-mer and each value is the row-scaled signal used for heatmaps. This exact k-mer heatmap is disabled by default because it can be very large. To enable it, edit the YAML header at the top of this file and set:
+
+```{{text}}
+render_exact_kmer_heatmap: true
+```
+
+The exact heatmap uses the same sample column dendrogram as the default heatmap when `cluster_samples` is true. K-mer rows are not clustered because millions of row dendrogram leaves are not interpretable; rows are ordered by cluster and then by total absolute signal. Users can manually change `exact_heatmap_min_total_signal` and `exact_heatmap_max_kmers` in the YAML header to control how many rows are plotted and saved.
 
 ```{{r}}
-#| eval: false
-min_total_count <- 10
-max_kmers <- 2000
+#| eval: !expr params$render_exact_kmer_heatmap
+min_total_signal <- params$exact_heatmap_min_total_signal
+max_kmers <- params$exact_heatmap_max_kmers
 
-count_df <- read_kite_tsv("exact_count_matrix.tsv")
-sample_cols <- intersect(samples, colnames(count_df))
-count_mat <- as.matrix(count_df[, sample_cols, drop = FALSE])
-mode(count_mat) <- "numeric"
-total_counts <- rowSums(count_mat)
-keep <- total_counts >= min_total_count
+heatmap_df <- read_kite_tsv("heatmap_matrix.tsv")
+sample_cols <- intersect(samples, colnames(heatmap_df))
+heatmap_mat <- as.matrix(heatmap_df[, sample_cols, drop = FALSE])
+mode(heatmap_mat) <- "numeric"
+total_signal <- rowSums(abs(heatmap_mat))
+keep <- total_signal >= min_total_signal
 
 if (sum(keep) > max_kmers) {{
   keep_idx <- which(keep)
-  keep_idx <- keep_idx[order(total_counts[keep_idx], decreasing = TRUE)[seq_len(max_kmers)]]
+  keep_idx <- keep_idx[order(total_signal[keep_idx], decreasing = TRUE)[seq_len(max_kmers)]]
 }} else {{
   keep_idx <- which(keep)
 }}
 
-exact_mat <- log1p(count_mat[keep_idx, , drop = FALSE])
-exact_mat <- t(scale(t(exact_mat)))
+keep_idx <- keep_idx[order(heatmap_df$cluster[keep_idx], -total_signal[keep_idx])]
+exact_mat <- heatmap_mat[keep_idx, , drop = FALSE]
 exact_mat[!is.finite(exact_mat)] <- 0
-rownames(exact_mat) <- count_df$kmer[keep_idx]
+rownames(exact_mat) <- heatmap_df$kmer[keep_idx]
 
 ht_exact <- ComplexHeatmap::Heatmap(
   exact_mat,
   name = "z-score",
   col = heatmap_col_fun,
-  cluster_rows = TRUE,
+  cluster_rows = FALSE,
   cluster_columns = params$cluster_samples,
+  show_column_dend = params$cluster_samples,
+  column_dend_height = grid::unit(24, "mm"),
   show_row_names = FALSE,
   rect_gp = grid::gpar(col = NA),
   column_names_gp = grid::gpar(fontfamily = "sans", fontsize = 10)
@@ -1233,10 +1886,8 @@ ComplexHeatmap::draw(ht_exact, heatmap_legend_side = "right")
 ```
 
 ```{{r}}
-#| eval: false
-png(file.path(out_dir, "heatmap_exact_filtered.png"), width = 9, height = 8, units = "in", res = 320)
-ComplexHeatmap::draw(ht_exact, heatmap_legend_side = "right")
-dev.off()
+#| eval: !expr params$render_exact_kmer_heatmap
+save_heatmap(ht_exact, "heatmap_exact_filtered.png", width = 9, height = 8)
 ```
 
 ## Heatmap cluster centroids

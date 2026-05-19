@@ -96,9 +96,11 @@ pub fn create_output_writer(path: &str) -> anyhow::Result<Box<dyn Write>> {
 pub fn infer_sample_labels(paths: &[String], labels: &[String]) -> anyhow::Result<Vec<String>> {
     if !labels.is_empty() && labels.len() != paths.len() {
         bail!(
-            "--label count ({}) must match input count ({})",
+            "--label count ({}) must match input count ({}). labels=[{}], inputs=[{}]",
             labels.len(),
-            paths.len()
+            paths.len(),
+            labels.join(", "),
+            paths.join(", ")
         );
     }
     if !labels.is_empty() {
@@ -145,7 +147,24 @@ pub fn open_readers(paths: &[String]) -> anyhow::Result<Vec<Arc<KiteReader>>> {
     Ok(readers)
 }
 
-pub fn ensure_compatible(readers: &[Arc<KiteReader>]) -> anyhow::Result<CompatibleMetadata> {
+pub fn ensure_compatible_with_paths(
+    readers: &[Arc<KiteReader>],
+    paths: &[String],
+) -> anyhow::Result<CompatibleMetadata> {
+    ensure_compatible_with_names(readers, Some(paths))
+}
+
+fn input_name(index: usize, paths: Option<&[String]>) -> String {
+    paths
+        .and_then(|paths| paths.get(index))
+        .map(|path| format!("input #{} ({})", index + 1, path))
+        .unwrap_or_else(|| format!("input #{}", index + 1))
+}
+
+fn ensure_compatible_with_names(
+    readers: &[Arc<KiteReader>],
+    paths: Option<&[String]>,
+) -> anyhow::Result<CompatibleMetadata> {
     let Some(first) = readers.first() else {
         bail!("no input .kite files provided");
     };
@@ -156,36 +175,42 @@ pub fn ensure_compatible(readers: &[Arc<KiteReader>]) -> anyhow::Result<Compatib
         key_width: first.header.key_width,
     };
     for (index, reader) in readers.iter().enumerate().skip(1) {
+        let name = input_name(index, paths);
+        let first_name = input_name(0, paths);
         if reader.header.k != meta.k {
             bail!(
-                "input #{} has k={}, expected {}",
-                index + 1,
+                "{} has k={}, expected k={} from {}",
+                name,
                 reader.header.k,
-                meta.k
+                meta.k,
+                first_name
             );
         }
         if (reader.header.canonical != 0) != meta.canonical {
             bail!(
-                "input #{} has canonical={}, expected {}",
-                index + 1,
+                "{} has canonical={}, expected canonical={} from {}",
+                name,
                 reader.header.canonical != 0,
-                meta.canonical
+                meta.canonical,
+                first_name
             );
         }
         if reader.header.partitions as usize != meta.partitions {
             bail!(
-                "input #{} has partitions={}, expected {}",
-                index + 1,
+                "{} has partitions={}, expected partitions={} from {}",
+                name,
                 reader.header.partitions,
-                meta.partitions
+                meta.partitions,
+                first_name
             );
         }
         if reader.header.key_width != meta.key_width {
             bail!(
-                "input #{} has key_width={}, expected {}",
-                index + 1,
+                "{} has key_width={}, expected key_width={} from {}",
+                name,
                 reader.header.key_width,
-                meta.key_width
+                meta.key_width,
+                first_name
             );
         }
     }
@@ -271,12 +296,16 @@ pub fn encode_query_kmer(seq: &str, meta: &CompatibleMetadata) -> anyhow::Result
 
 pub fn key_to_string(key: KmerKey, meta: &CompatibleMetadata) -> String {
     let mut buf = vec![0u8; meta.k as usize];
-    if meta.key_width == KEY_WIDTH_U256 {
-        decode_kmer_u256(key.lo, key.hi, meta.k, &mut buf);
-    } else {
-        decode_kmer_any(key.lo, meta.k, &mut buf);
-    }
+    fill_key_buffer(key, meta, &mut buf);
     String::from_utf8(buf).unwrap_or_else(|_| "N".repeat(meta.k as usize))
+}
+
+pub fn fill_key_buffer(key: KmerKey, meta: &CompatibleMetadata, buf: &mut [u8]) {
+    if meta.key_width == KEY_WIDTH_U256 {
+        decode_kmer_u256(key.lo, key.hi, meta.k, buf);
+    } else {
+        decode_kmer_any(key.lo, meta.k, buf);
+    }
 }
 
 pub struct PartitionProgress {
@@ -503,8 +532,16 @@ fn decode_dvle_rows(
 }
 
 pub fn merge_vectors_total(vectors: &[Vec<(KmerKey, u64)>]) -> Vec<(KmerKey, u64)> {
+    match vectors.len() {
+        0 => return Vec::new(),
+        1 => return vectors[0].clone(),
+        2 => return merge_vectors_total_two(vectors),
+        3 => return merge_vectors_total_three(vectors),
+        _ => {}
+    }
     let mut indexes = vec![0usize; vectors.len()];
-    let mut merged = Vec::new();
+    let capacity = vectors.iter().map(Vec::len).sum();
+    let mut merged = Vec::with_capacity(capacity);
     loop {
         let mut min_key = None;
         for (file_index, vector) in vectors.iter().enumerate() {
@@ -536,6 +573,13 @@ pub fn for_each_union_row<F>(vectors: &[Vec<(KmerKey, u64)>], mut f: F) -> anyho
 where
     F: FnMut(KmerKey, &[u64]) -> anyhow::Result<()>,
 {
+    match vectors.len() {
+        0 => return Ok(()),
+        1 => return for_each_union_row_one(vectors, f),
+        2 => return for_each_union_row_two(vectors, f),
+        3 => return for_each_union_row_three(vectors, f),
+        _ => {}
+    }
     let mut indexes = vec![0usize; vectors.len()];
     let mut row = vec![0u64; vectors.len()];
     loop {
@@ -561,6 +605,145 @@ where
             }
         }
         f(target_key, &row)?;
+    }
+    Ok(())
+}
+
+fn merge_vectors_total_two(vectors: &[Vec<(KmerKey, u64)>]) -> Vec<(KmerKey, u64)> {
+    let left = &vectors[0];
+    let right = &vectors[1];
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    while i < left.len() && j < right.len() {
+        match left[i].0.cmp(&right[j].0) {
+            std::cmp::Ordering::Less => {
+                merged.push(left[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                merged.push(right[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                merged.push((left[i].0, left[i].1.saturating_add(right[j].1)));
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    merged.extend_from_slice(&left[i..]);
+    merged.extend_from_slice(&right[j..]);
+    merged
+}
+
+fn merge_vectors_total_three(vectors: &[Vec<(KmerKey, u64)>]) -> Vec<(KmerKey, u64)> {
+    let a = &vectors[0];
+    let b = &vectors[1];
+    let c = &vectors[2];
+    let mut ia = 0usize;
+    let mut ib = 0usize;
+    let mut ic = 0usize;
+    let mut merged = Vec::with_capacity(a.len() + b.len() + c.len());
+    loop {
+        let ka = a.get(ia).map(|entry| entry.0);
+        let kb = b.get(ib).map(|entry| entry.0);
+        let kc = c.get(ic).map(|entry| entry.0);
+        let Some(target) = [ka, kb, kc].into_iter().flatten().min() else {
+            break;
+        };
+        let mut total = 0u64;
+        if ka == Some(target) {
+            total = total.saturating_add(a[ia].1);
+            ia += 1;
+        }
+        if kb == Some(target) {
+            total = total.saturating_add(b[ib].1);
+            ib += 1;
+        }
+        if kc == Some(target) {
+            total = total.saturating_add(c[ic].1);
+            ic += 1;
+        }
+        merged.push((target, total));
+    }
+    merged
+}
+
+fn for_each_union_row_one<F>(vectors: &[Vec<(KmerKey, u64)>], mut f: F) -> anyhow::Result<()>
+where
+    F: FnMut(KmerKey, &[u64]) -> anyhow::Result<()>,
+{
+    let mut row = [0u64; 1];
+    for (key, count) in &vectors[0] {
+        row[0] = *count;
+        f(*key, &row)?;
+    }
+    Ok(())
+}
+
+fn for_each_union_row_two<F>(vectors: &[Vec<(KmerKey, u64)>], mut f: F) -> anyhow::Result<()>
+where
+    F: FnMut(KmerKey, &[u64]) -> anyhow::Result<()>,
+{
+    let left = &vectors[0];
+    let right = &vectors[1];
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut row = [0u64; 2];
+    while i < left.len() || j < right.len() {
+        let target = match (left.get(i), right.get(j)) {
+            (Some((key, _)), Some((other, _))) => (*key).min(*other),
+            (Some((key, _)), None) => *key,
+            (None, Some((key, _))) => *key,
+            (None, None) => break,
+        };
+        row.fill(0);
+        if left.get(i).map(|entry| entry.0) == Some(target) {
+            row[0] = left[i].1;
+            i += 1;
+        }
+        if right.get(j).map(|entry| entry.0) == Some(target) {
+            row[1] = right[j].1;
+            j += 1;
+        }
+        f(target, &row)?;
+    }
+    Ok(())
+}
+
+fn for_each_union_row_three<F>(vectors: &[Vec<(KmerKey, u64)>], mut f: F) -> anyhow::Result<()>
+where
+    F: FnMut(KmerKey, &[u64]) -> anyhow::Result<()>,
+{
+    let a = &vectors[0];
+    let b = &vectors[1];
+    let c = &vectors[2];
+    let mut ia = 0usize;
+    let mut ib = 0usize;
+    let mut ic = 0usize;
+    let mut row = [0u64; 3];
+    loop {
+        let ka = a.get(ia).map(|entry| entry.0);
+        let kb = b.get(ib).map(|entry| entry.0);
+        let kc = c.get(ic).map(|entry| entry.0);
+        let Some(target) = [ka, kb, kc].into_iter().flatten().min() else {
+            break;
+        };
+        row.fill(0);
+        if ka == Some(target) {
+            row[0] = a[ia].1;
+            ia += 1;
+        }
+        if kb == Some(target) {
+            row[1] = b[ib].1;
+            ib += 1;
+        }
+        if kc == Some(target) {
+            row[2] = c[ic].1;
+            ic += 1;
+        }
+        f(target, &row)?;
     }
     Ok(())
 }
