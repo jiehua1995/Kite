@@ -52,12 +52,29 @@ pub enum EmbeddingMode {
 #[derive(Parser, Debug)]
 #[command(
     name = "kite",
+    author,
     about = "k-mer indexing and throughput engine",
     version,
-    disable_version_flag = true
+    disable_version_flag = true,
+    color = clap::ColorChoice::Never,
+    help_template = "\
+{name}:  {about}
+
+Version: {version}
+Author:  {author}
+
+Usage:   {usage}
+
+{all-args}
+"
 )]
 pub struct Cli {
-    #[arg(short = 'v', long = "version", action = ArgAction::Version, help_heading = "Help")]
+    #[arg(
+        short = 'v',
+        long = "version",
+        action = ArgAction::Version,
+        help = "Print version information"
+    )]
     _version: Option<bool>,
 
     #[command(subcommand)]
@@ -352,9 +369,19 @@ pub struct HistoArgs {
     )]
     pub output: String,
 
-    /// Labels for the input files.
+    /// Labels for the input files. Defaults to file names without common suffixes.
     #[arg(long = "label", num_args = 1.., action = ArgAction::Set, value_name = "LABEL", help_heading = "Behavior")]
     pub labels: Option<Vec<String>>,
+
+    /// Number of threads to use. Use 0 to auto-detect.
+    #[arg(
+        short = 't',
+        long = "threads",
+        default_value_t = 0,
+        value_name = "N",
+        help_heading = "Performance"
+    )]
+    pub threads: usize,
 
     /// Show progress.
     #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
@@ -390,6 +417,16 @@ pub struct MergeArgs {
     )]
     pub output: String,
 
+    /// Number of threads to use. Use 0 to auto-detect.
+    #[arg(
+        short = 't',
+        long = "threads",
+        default_value_t = 0,
+        value_name = "N",
+        help_heading = "Performance"
+    )]
+    pub threads: usize,
+
     /// Show progress.
     #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
     pub progress: bool,
@@ -424,9 +461,19 @@ pub struct ProfileArgs {
     )]
     pub output: String,
 
-    /// Labels for the input files.
+    /// Labels for the input files. Defaults to file names without common suffixes.
     #[arg(long = "label", num_args = 1.., action = ArgAction::Set, value_name = "LABEL", help_heading = "Behavior")]
     pub labels: Option<Vec<String>>,
+
+    /// Number of threads to use. Use 0 to auto-detect.
+    #[arg(
+        short = 't',
+        long = "threads",
+        default_value_t = 0,
+        value_name = "N",
+        help_heading = "Performance"
+    )]
+    pub threads: usize,
 
     /// Show progress.
     #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
@@ -462,7 +509,7 @@ pub struct AnalyzeArgs {
     )]
     pub output_dir: String,
 
-    /// Labels for the input files.
+    /// Labels for the input files. Defaults to file names without common suffixes.
     #[arg(long = "label", num_args = 1.., action = ArgAction::Set, value_name = "LABEL", help_heading = "Behavior")]
     pub labels: Option<Vec<String>>,
 
@@ -510,6 +557,16 @@ pub struct AnalyzeArgs {
         help_heading = "Analysis"
     )]
     pub cluster_samples: bool,
+
+    /// Number of threads to use. Use 0 to auto-detect.
+    #[arg(
+        short = 't',
+        long = "threads",
+        default_value_t = 0,
+        value_name = "N",
+        help_heading = "Performance"
+    )]
+    pub threads: usize,
 
     /// Show progress.
     #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
@@ -576,7 +633,7 @@ pub struct FlyArgs {
     )]
     pub output_dir: String,
 
-    /// Labels for the input files.
+    /// Labels for the input files. Defaults to file names without common suffixes.
     #[arg(long = "label", num_args = 1.., action = ArgAction::Set, value_name = "LABEL", help_heading = "Behavior")]
     pub labels: Option<Vec<String>>,
 
@@ -691,6 +748,16 @@ pub struct FlyArgs {
         help_heading = "Analysis"
     )]
     pub cluster_samples: bool,
+
+    /// Keep intermediate .kite databases after analysis.
+    #[arg(
+        long = "keep-intermediate",
+        default_value_t = true,
+        action = ArgAction::Set,
+        value_name = "BOOL",
+        help_heading = "Behavior"
+    )]
+    pub keep_intermediate: bool,
 
     /// Show progress.
     #[arg(short = 'p', long = "progress", help_heading = "Behavior")]

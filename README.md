@@ -3,24 +3,24 @@
 <p>
 	<img src="doc/logo.png" alt="logo" width="100" align="left">
 </p> 
-**Kite** is a high-performance Rust toolkit for exact k-mer counting, storage, inspection, and downstream multi-sample analysis.
+**Kite** is a high-performance Rust toolkit for exact k-mer counting, reusable `.kite` indexes, inspection, and downstream multi-sample analysis.
 
 Its design goal is simple:
 
 - make `count` fast
 - make `dump` fast
-- keep the `.kite` format explicit and reusable
-- provide built-in commands for inspection, merging, profiling, and Quarto/R-based reporting
+- keep the `.kite` file format explicit, versioned, and reusable
+- provide built-in commands for inspection, merging, profiling, workflow reporting, and Quarto/R-based analysis
 
-Kite is organized as a command-oriented codebase. Each subcommand lives in its own `src/<command>/` directory, while the `.kite` format and shared helpers are reused across commands.
+Kite is positioned as an exact counter plus analysis bridge: it stores exact k-mer counts once, keeps filtering rules as editable header metadata, and lets downstream commands reuse the same index without rerunning the count stage. The `.kite` file format is documented in [`docs/file_format.md`](docs/file_format.md).
 
 ## Command Overview
 
 | Command | Purpose | Typical input | Typical output |
 |---|---|---|---|
-| `kite count` | Count k-mers from FASTQ input and write a `.kite` database | `FASTQ`, `FASTQ.GZ`, `BGZF FASTQ` | `.kite` |
-| `kite dump` | Export exact k-mer counts from a `.kite` database | `.kite` | `TSV` |
-| `kite info` | Print structured metadata and summary statistics for one database | `.kite` | stdout |
+| `kite count` | Count k-mers from FASTQ input and write a `.kite` index | `FASTQ`, `FASTQ.GZ`, `BGZF FASTQ` | `.kite` |
+| `kite dump` | Export exact k-mer counts from a `.kite` index | `.kite` | `TSV` |
+| `kite info` | Print or edit structured metadata for one `.kite` index | `.kite` | stdout |
 | `kite query` | Look up one exact k-mer count | `.kite` + k-mer | stdout |
 | `kite histo` | Write count-frequency histograms for one or more databases | `.kite`... | `.tsv` |
 | `kite merge` | Merge compatible `.kite` databases by exact count summation | `.kite`... | `.kite` |
@@ -33,14 +33,14 @@ Kite is organized as a command-oriented codebase. Each subcommand lives in its o
 
 | Principle | Meaning |
 |---|---|
-| Minimal inspection commands | `info` and `query` print directly to stdout and do not expose thread, memory, output, or progress options; `info` can also edit header-only filter markers. |
+| Lightweight inspection commands | `info`, `query`, and `citation` print directly to stdout or a small output file and do not expose thread control. `info` can also edit header-only filter markers. |
 | Multi-file input style | Commands that accept multiple inputs use one `-i/--input` followed by all files, for example `-i sample1.kite sample2.kite`. |
 | Consistent sample labeling | `histo`, `profile`, `analyze`, and `fly` use `--label sample1 sample2 ...`; label count must match input count. |
 | Strict memory syntax | `count` and `fly` use `--memory`, with values like `512M`, `64G`, or `1T`. The suffix must be `M`, `G`, or `T`. |
-| Simple thread convention | Commands that expose thread control use `-t, --threads`. |
+| Simple thread convention | Compute-heavy commands use `-t, --threads`; `0` means automatic control. Metadata-only commands stay minimal. |
 | Lazy count filters | `count --min/--max` stores filter markers in the `.kite` header without deleting raw counts. Downstream commands apply those markers when exporting or analyzing. |
-| Quarto/R reporting | `analyze` writes TSV tables and `analysis_report.qmd`; render the report with Quarto/R to generate figures. |
-| One-shot workflow | `fly` forwards the core `count` and `analyze` options so a one-command workflow has the same semantics as running the stages manually. |
+| Reporting | `merge`, `analyze`, and `fly` write Markdown reports that summarize inputs, outputs, settings, and timing. `analyze` also writes `analysis_report.qmd` for Quarto/R figures. |
+| One-shot workflow | `fly` forwards the core `count` and `analyze` options, writes a workflow report, and can keep or remove intermediate `.kite` files. |
 
 ## Build
 
@@ -223,6 +223,7 @@ Run the full one-shot workflow:
 | `-i, --input` | required | One or more `.kite` files | Use one `-i` followed by all files; one histogram column per input |
 | `--label` | inferred from filenames | Sample labels | Must match the number of inputs |
 | `-o, --output` | required | Histogram TSV output | First column is `count` |
+| `-t, --threads` | `0` | Number of input files to process in parallel | `0` means auto |
 | `-p, --progress` | `false` | Show progress | More useful for many inputs |
 
 `histo` applies each input file's header count filters before building count-frequency bins.
@@ -233,6 +234,7 @@ Run the full one-shot workflow:
 |---|---|---|---|
 | `-i, --input` | required | Two or more `.kite` files | Use one `-i` followed by all files; inputs must be compatible |
 | `-o, --output` | required | Output merged `.kite` file | Exact summation, no sketching |
+| `-t, --threads` | `0` | Parallel input-loading workers per partition | `0` means auto |
 | `-p, --progress` | `false` | Show progress | Also prints compatibility summaries |
 
 Compatibility requirements:
@@ -242,7 +244,7 @@ Compatibility requirements:
 - same `partitions`
 - same `key_width`
 
-`merge` applies each input file's header filters before summing counts. If every input has the same `Min Count` or `Max Count` marker, that marker is copied to the merged output header; otherwise the merged output leaves the differing marker unset.
+`merge` applies each input file's header filters before summing counts. If every input has the same `Min Count` or `Max Count` marker, that marker is copied to the merged output header; otherwise the merged output leaves the differing marker unset. A Markdown report is written next to the merged output as `<output>.merge_report.md`.
 
 ### `kite profile`
 
@@ -251,6 +253,7 @@ Compatibility requirements:
 | `-i, --input` | required | One or more `.kite` files | Use one `-i` followed by all files; uses the union of observed k-mers |
 | `--label` | inferred from filenames | Sample labels | Must match the number of inputs |
 | `-o, --output` | required | Output TSV path | First column is `kmer` |
+| `-t, --threads` | `0` | Parallel input-loading workers per partition | `0` means auto |
 | `-p, --progress` | `false` | Show progress | Useful for multi-sample runs |
 
 `profile` applies each input file's header count filters before constructing the union-by-sample matrix.
@@ -261,15 +264,16 @@ Compatibility requirements:
 |---|---|---|---|
 | `-i, --input` | required | One or more `.kite` files | Use one `-i` followed by all files; builds an exact multi-sample matrix |
 | `--label` | inferred from filenames | Sample labels | Must match the number of inputs |
-| `-o, --output-dir` | required | Output directory | TSV tables and `analysis_report.qmd` are written here |
+| `-o, --output-dir` | required | Output directory | TSV tables, `analysis_report.md`, and `analysis_report.qmd` are written here |
 | `--correlation` | `pearson` | Correlation or distance mode | `all`, `pearson`, `spearman`, `cosine`, `euclidean`, `manhattan`, or `mahalanobis` |
 | `--embedding` | `pca` | Embedding mode | `all`, `pca`, `tsne`, `umap`, or `pacmap` (`pcamap` is accepted as an alias) |
 | `--heatmap-kmeans` | `6` | Number of k-means row clusters for heatmap generation | Applied to top variable k-mers |
 | `--heatmap-seed` | `1` | Random seed for heatmap k-means and stochastic embeddings | Also used for `t-SNE`, `UMAP`, and `PaCMAP` |
 | `--cluster-samples` | `true` | Cluster sample columns before writing heatmap outputs | Accepts `true` or `false` |
+| `-t, --threads` | `0` | Parallel input-loading workers per partition | `0` means auto |
 | `-p, --progress` | `false` | Show progress | Recommended for larger runs |
 
-`analyze` applies each input file's header count filters before constructing the exact matrix. It writes exact tables in Rust and generates `analysis_report.qmd`. Render the Quarto document when you want R/ggplot2 and ComplexHeatmap figures.
+`analyze` applies each input file's header count filters before constructing the exact matrix. It writes exact tables in Rust, writes `analysis_report.md` as a static run summary, and generates `analysis_report.qmd`. Render the Quarto document when you want R/ggplot2 and ComplexHeatmap figures.
 
 ### `kite analyze` Output Files
 
@@ -291,12 +295,16 @@ Compatibility requirements:
 | `heatmap_plot_matrix.tsv` | Smaller heatmap matrix used by the Quarto report |
 | `heatmap_clusters.tsv` | Heatmap cluster centroids |
 | `heatmap_samples.tsv` | Heatmap sample order |
+| `analysis_report.md` | Static Markdown report with inputs, settings, selected methods, and output inventory |
 | `analysis_report.qmd` | Quarto/R report for generating figures from the TSV tables |
 
 R-side notes:
 
 - Kite itself does not render figures.
-- The generated `analysis_report.qmd` declares and installs the R packages it needs when rendered.
+- The generated `analysis_report.qmd` declares and installs the R packages it needs when rendered, then reads and summarizes the TSV inventory and sample summary before plotting.
+- The default report saves separate PNG and PDF files for sample summaries, correlation/distance heatmaps, embeddings, and the cluster-representative heatmap with fixed figure sizes.
+- The default heatmap uses `heatmap_clusters.tsv`, shows one representative row per k-mer cluster, and includes a sample-column dendrogram when `--cluster-samples true`.
+- `heatmap_matrix.tsv` still contains one row per exact k-mer. To plot that larger exact heatmap, edit the QMD YAML and set `render_exact_kmer_heatmap: true`; exact k-mer rows are ordered but not hierarchically clustered.
 - Kite still writes all TSV tables even if R or Quarto is not installed.
 
 ### `kite citation`
@@ -328,13 +336,16 @@ R-side notes:
 | `--heatmap-kmeans` | `6` | Heatmap row cluster count passed to analyze | |
 | `--heatmap-seed` | `1` | Random seed passed to analyze | |
 | `--cluster-samples` | `true` | Sample clustering flag passed to analyze | |
+| `--keep-intermediate` | `true` | Keep intermediate `.kite` files in `databases/` after analysis | Set `false` to remove them after the report is written |
 | `-p, --progress` | `false` | Show progress | Forwarded to internal count and analyze steps |
 
 `fly` runs:
 
 1. `count` on each input sequencing file
 2. `analyze` on the resulting `.kite` databases
-3. `analysis_report.qmd` generation for downstream figures
+3. `analysis_report.md`, `analysis_report.qmd`, and `kite_flye_workflow_report.md` generation
+
+`kite_flye_workflow_report.md` records the workflow inputs, per-stage outputs, key settings, and elapsed time. When `--keep-intermediate false` is used, the report is written before intermediate `.kite` files are removed.
 
 ## Installation
 
