@@ -18,7 +18,7 @@ pub fn run_citation(args: &CitationArgs) -> anyhow::Result<()> {
             writeln!(out, "Title: Kite")?;
             writeln!(
                 out,
-                "Description: High-performance two-stage k-mer database toolkit"
+                "Description: k-mer index and throughput engine"
             )?;
             writeln!(
                 out,
@@ -27,7 +27,7 @@ pub fn run_citation(args: &CitationArgs) -> anyhow::Result<()> {
             )?;
             writeln!(
                 out,
-                "Note: no formal DOI or manuscript metadata is embedded in this build yet."
+                "Note: no formal DOI or manuscript metadata is embedded in this build yet. We recommend citing the software version and title, and including a link to the GitHub repository: https://github.com/jiehua1995/kite. Once a formal DOI and manuscript are available, we will update this citation information accordingly."
             )?;
         }
         CitationFormat::Bibtex => {
@@ -39,7 +39,7 @@ pub fn run_citation(args: &CitationArgs) -> anyhow::Result<()> {
             writeln!(out, "  title = {{Kite}},")?;
             writeln!(
                 out,
-                "  note = {{High-performance two-stage k-mer database toolkit}},"
+                "  note = {{k-mer index and throughput engine}},"
             )?;
             writeln!(out, "  year = {{2026}},")?;
             writeln!(

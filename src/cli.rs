@@ -32,6 +32,7 @@ pub enum CorrelationMode {
     All,
     Pearson,
     Spearman,
+    Kendall,
     Cosine,
     Euclidean,
     Manhattan,
@@ -47,6 +48,12 @@ pub enum EmbeddingMode {
     Umap,
     #[value(alias = "pcamap")]
     Pacmap,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum EmbeddingInputMode {
+    Full,
+    Pca,
 }
 
 #[derive(Parser, Debug)]
@@ -113,6 +120,10 @@ pub enum Commands {
 
     /// Run the whole workflow in a single command.
     Fly(FlyArgs),
+
+    /// Hidden easter egg.
+    #[command(hide = true)]
+    Wind(WindArgs),
 }
 
 // All subcommands and their arguments
@@ -152,7 +163,7 @@ pub struct CountArgs {
     )]
     pub k: u8,
 
-    /// Whether to canonicalize k-mers. Set to true or false. Default: false.
+    /// Whether to canonicalize k-mers. Set to true or false.
     #[arg(long = "canonical", action = ArgAction::Set, default_value_t = false, value_name = "BOOL", help_heading = "k-mer")]
     pub canonical: bool,
 
@@ -164,7 +175,7 @@ pub struct CountArgs {
     #[arg(long = "max", value_name = "N", help_heading = "k-mer")]
     pub max: Option<u32>,
 
-    /// Output compression mode: fast=DVLE/raw only, balanced=DVLE/raw plus zstd level 2 when smaller, compact=DVLE/raw plus zstd level 5 when smaller. Default: fast.
+    /// Output compression mode.
     #[arg(long = "mode", value_enum, default_value_t = CountMode::Fast, value_name = "MODE", help_heading = "Performance")]
     pub mode: CountMode,
 
@@ -196,11 +207,11 @@ pub struct CountArgs {
     )]
     pub chunk_kmers: usize,
 
-    /// Memory limit, for example 8G, 16000M, or 500000000.
+    /// Memory limit, for example 8G, 16000M, or 500000000. If omitted, count auto-uses about 2/3 of currently available memory.
     #[arg(long = "memory", value_name = "SIZE", help_heading = "Performance")]
     pub memory: Option<String>,
 
-    /// Staging buffer target in MB. Independent of --mode. Default: 32.
+    /// Staging buffer target in MB. Independent of --mode.
     #[arg(
         long = "buffer",
         default_value_t = 32,
@@ -274,7 +285,7 @@ pub struct DumpArgs {
 /// Show metadata and summary information for a .kite file.
 #[derive(Args, Debug)]
 #[command(
-    after_help = "Examples:\n  kite info -i sample.kite",
+    after_help = "Examples:\n  kite info -i sample.kite\n  kite info -i sample.kite --set-min 2 --set-max 100\n  kite info -i sample.kite --clear-min --clear-max",
     help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
     disable_help_flag = true
 )]
@@ -443,7 +454,7 @@ pub struct MergeArgs {
 /// Profile k-mer content across samples into a table.
 #[derive(Args, Debug)]
 #[command(
-    after_help = "Examples:\n  kite profile -i sample1.kite sample2.kite -o profile.tsv",
+    after_help = "Examples:\n  kite profile -i a.kite b.kite -o profile.tsv",
     help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
     disable_help_flag = true
 )]
@@ -491,7 +502,7 @@ pub struct ProfileArgs {
 /// Analyze multiple .kite files and write TSV tables plus a Quarto report.
 #[derive(Args, Debug, Clone)]
 #[command(
-    after_help = "Examples:\n  kite analyze -i sample1.kite sample2.kite -o analysis_dir",
+    after_help = "Examples:\n  kite analyze -i sample1.kite sample2.kite -o analysis_dir\n  kite analyze -i sample1.kite sample2.kite -o analysis_dir --embedding all --embedding-input pca\n  kite analyze -i sample1.kite sample2.kite -o analysis_dir --embedding all --embedding-input full\n\nNotes:\n  Non-linear embeddings default to `--embedding-input pca` for speed.\n  Use `--embedding-input full` when you want the original full k-mer feature matrix instead.\n  Background: scikit-learn TSNE recommends PCA/SVD before t-SNE for very high-dimensional features:\n    https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html\n  PaCMAP docs also note that PCA preprocessing can substantially accelerate DR:\n    https://github.com/YingfanWang/PaCMAP",
     help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
     disable_help_flag = true
 )]
@@ -513,15 +524,6 @@ pub struct AnalyzeArgs {
     #[arg(long = "label", num_args = 1.., action = ArgAction::Set, value_name = "LABEL", help_heading = "Behavior")]
     pub labels: Option<Vec<String>>,
 
-    /// Number of top variable k-mers to analyze. Use 0 for all.
-    #[arg(
-        long = "top-variable-kmers",
-        default_value_t = 0,
-        value_name = "N",
-        hide = true
-    )]
-    pub top_variable_kmers: usize,
-
     /// Correlation mode for analysis.
     #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::Pearson, value_name = "MODE", help_heading = "Analysis")]
     pub correlation: CorrelationMode,
@@ -529,6 +531,19 @@ pub struct AnalyzeArgs {
     /// Embedding mode for analysis.
     #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::Pca, value_name = "MODE", help_heading = "Analysis")]
     pub embedding: EmbeddingMode,
+
+    /// Input representation for non-linear embeddings. `pca` is the default speed-oriented path; `full` keeps the original full k-mer feature matrix.
+    #[arg(long = "embedding-input", value_enum, default_value_t = EmbeddingInputMode::Pca, value_name = "MODE", help_heading = "Analysis")]
+    pub embedding_input: EmbeddingInputMode,
+
+    /// Number of PCA dimensions to keep when `--embedding-input pca` is used.
+    #[arg(
+        long = "embedding-input-dims",
+        default_value_t = 50,
+        value_name = "N",
+        help_heading = "Analysis"
+    )]
+    pub embedding_input_dims: usize,
 
     /// Number of clusters for heatmap k-means.
     #[arg(
@@ -539,14 +554,15 @@ pub struct AnalyzeArgs {
     )]
     pub heatmap_kmeans: usize,
 
-    /// Seed for heatmap k-means.
+    /// Seed for stochastic analysis methods. `--heatmap-seed` is kept as a compatibility alias.
     #[arg(
-        long = "heatmap-seed",
-        default_value_t = 1,
+        long = "seed",
+        visible_alias = "heatmap-seed",
+        default_value_t = 42,
         value_name = "N",
         help_heading = "Analysis"
     )]
-    pub heatmap_seed: u64,
+    pub seed: u64,
 
     /// Whether to cluster samples in heatmaps.
     #[arg(
@@ -557,6 +573,62 @@ pub struct AnalyzeArgs {
         help_heading = "Analysis"
     )]
     pub cluster_samples: bool,
+
+    /// t-SNE perplexity. When omitted, Kite derives it from the sample count.
+    #[arg(
+        long = "tsne-perplexity",
+        value_name = "FLOAT",
+        help_heading = "Analysis"
+    )]
+    pub tsne_perplexity: Option<f64>,
+
+    /// t-SNE learning rate.
+    #[arg(
+        long = "tsne-learning-rate",
+        default_value_t = 200.0,
+        value_name = "FLOAT",
+        help_heading = "Analysis"
+    )]
+    pub tsne_learning_rate: f64,
+
+    /// t-SNE iterations.
+    #[arg(
+        long = "tsne-iterations",
+        default_value_t = 750,
+        value_name = "N",
+        help_heading = "Analysis"
+    )]
+    pub tsne_iterations: usize,
+
+    /// UMAP neighbors. When omitted, Kite derives it from the sample count.
+    #[arg(long = "umap-neighbors", value_name = "N", help_heading = "Analysis")]
+    pub umap_neighbors: Option<usize>,
+
+    /// UMAP min_dist.
+    #[arg(
+        long = "umap-min-dist",
+        default_value_t = 0.1,
+        value_name = "FLOAT",
+        help_heading = "Analysis"
+    )]
+    pub umap_min_dist: f64,
+
+    /// UMAP spread.
+    #[arg(
+        long = "umap-spread",
+        default_value_t = 1.0,
+        value_name = "FLOAT",
+        help_heading = "Analysis"
+    )]
+    pub umap_spread: f64,
+
+    /// PaCMAP neighbors. When omitted, Kite derives it from the sample count.
+    #[arg(long = "pacmap-neighbors", value_name = "N", help_heading = "Analysis")]
+    pub pacmap_neighbors: Option<usize>,
+
+    /// PaCMAP mid-near end. When omitted, Kite derives it from the sample count.
+    #[arg(long = "pacmap-mn-end", value_name = "N", help_heading = "Analysis")]
+    pub pacmap_mn_end: Option<usize>,
 
     /// Number of threads to use. Use 0 to auto-detect.
     #[arg(
@@ -615,7 +687,7 @@ pub struct CitationArgs {
 /// Run the whole workflow in a single command.
 #[derive(Args, Debug)]
 #[command(
-    after_help = "Examples:\n  kite fly -i reads1.fq reads2.fq -o out_dir\n  kite fly -i reads1.fq reads2.fq -o out_dir --canonical true",
+    after_help = "Examples:\n  kite fly -i reads1.fq reads2.fq -o out_dir\n  kite fly -i reads1.fq reads2.fq -o out_dir --canonical true\n  kite fly -i reads1.fq reads2.fq -o out_dir --embedding all --embedding-input pca\n  kite fly -i reads1.fq reads2.fq -o out_dir --embedding all --embedding-input full\n\nNotes:\n  Non-linear embeddings default to `--embedding-input pca` for speed.\n  Use `--embedding-input full` when you want the original full k-mer feature matrix instead.\n  Background: scikit-learn TSNE recommends PCA/SVD before t-SNE for very high-dimensional features:\n    https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html\n  PaCMAP docs also note that PCA preprocessing can substantially accelerate DR:\n    https://github.com/YingfanWang/PaCMAP",
     help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
     disable_help_flag = true
 )]
@@ -647,7 +719,7 @@ pub struct FlyArgs {
     )]
     pub k: u8,
 
-    /// Whether to canonicalize k-mers. Set to true or false. Default: false.
+    /// Whether to canonicalize k-mers. Set to true or false.
     #[arg(long = "canonical", action = ArgAction::Set, default_value_t = false, value_name = "BOOL", help_heading = "k-mer")]
     pub canonical: bool,
 
@@ -704,15 +776,6 @@ pub struct FlyArgs {
     )]
     pub buffer: usize,
 
-    /// Number of top variable k-mers to analyze. Use 0 for all.
-    #[arg(
-        long = "top-variable-kmers",
-        default_value_t = 0,
-        value_name = "N",
-        hide = true
-    )]
-    pub top_variable_kmers: usize,
-
     /// Correlation mode for analysis.
     #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::Pearson, value_name = "MODE", help_heading = "Analysis")]
     pub correlation: CorrelationMode,
@@ -720,6 +783,19 @@ pub struct FlyArgs {
     /// Embedding mode for analysis.
     #[arg(long = "embedding", value_enum, default_value_t = EmbeddingMode::Pca, value_name = "MODE", help_heading = "Analysis")]
     pub embedding: EmbeddingMode,
+
+    /// Input representation for non-linear embeddings. `pca` is the default speed-oriented path; `full` keeps the original full k-mer feature matrix.
+    #[arg(long = "embedding-input", value_enum, default_value_t = EmbeddingInputMode::Pca, value_name = "MODE", help_heading = "Analysis")]
+    pub embedding_input: EmbeddingInputMode,
+
+    /// Number of PCA dimensions to keep when `--embedding-input pca` is used.
+    #[arg(
+        long = "embedding-input-dims",
+        default_value_t = 50,
+        value_name = "N",
+        help_heading = "Analysis"
+    )]
+    pub embedding_input_dims: usize,
 
     /// Number of clusters for heatmap k-means.
     #[arg(
@@ -730,14 +806,15 @@ pub struct FlyArgs {
     )]
     pub heatmap_kmeans: usize,
 
-    /// Seed for heatmap k-means.
+    /// Seed for stochastic analysis methods. `--heatmap-seed` is kept as a compatibility alias.
     #[arg(
-        long = "heatmap-seed",
-        default_value_t = 1,
+        long = "seed",
+        visible_alias = "heatmap-seed",
+        default_value_t = 42,
         value_name = "N",
         help_heading = "Analysis"
     )]
-    pub heatmap_seed: u64,
+    pub seed: u64,
 
     /// Whether to cluster samples in heatmaps.
     #[arg(
@@ -748,6 +825,62 @@ pub struct FlyArgs {
         help_heading = "Analysis"
     )]
     pub cluster_samples: bool,
+
+    /// t-SNE perplexity. When omitted, Kite derives it from the sample count.
+    #[arg(
+        long = "tsne-perplexity",
+        value_name = "FLOAT",
+        help_heading = "Analysis"
+    )]
+    pub tsne_perplexity: Option<f64>,
+
+    /// t-SNE learning rate.
+    #[arg(
+        long = "tsne-learning-rate",
+        default_value_t = 200.0,
+        value_name = "FLOAT",
+        help_heading = "Analysis"
+    )]
+    pub tsne_learning_rate: f64,
+
+    /// t-SNE iterations.
+    #[arg(
+        long = "tsne-iterations",
+        default_value_t = 750,
+        value_name = "N",
+        help_heading = "Analysis"
+    )]
+    pub tsne_iterations: usize,
+
+    /// UMAP neighbors. When omitted, Kite derives it from the sample count.
+    #[arg(long = "umap-neighbors", value_name = "N", help_heading = "Analysis")]
+    pub umap_neighbors: Option<usize>,
+
+    /// UMAP min_dist.
+    #[arg(
+        long = "umap-min-dist",
+        default_value_t = 0.1,
+        value_name = "FLOAT",
+        help_heading = "Analysis"
+    )]
+    pub umap_min_dist: f64,
+
+    /// UMAP spread.
+    #[arg(
+        long = "umap-spread",
+        default_value_t = 1.0,
+        value_name = "FLOAT",
+        help_heading = "Analysis"
+    )]
+    pub umap_spread: f64,
+
+    /// PaCMAP neighbors. When omitted, Kite derives it from the sample count.
+    #[arg(long = "pacmap-neighbors", value_name = "N", help_heading = "Analysis")]
+    pub pacmap_neighbors: Option<usize>,
+
+    /// PaCMAP mid-near end. When omitted, Kite derives it from the sample count.
+    #[arg(long = "pacmap-mn-end", value_name = "N", help_heading = "Analysis")]
+    pub pacmap_mn_end: Option<usize>,
 
     /// Keep intermediate .kite databases after analysis.
     #[arg(
@@ -769,5 +902,16 @@ pub struct FlyArgs {
 
     /// Print help information for `kite fly`.
     #[arg(short = 'h', long = "help", action = ArgAction::Help, help_heading = "Help")]
+    pub _help: Option<bool>,
+}
+
+#[derive(Args, Debug)]
+#[command(
+    help_template = "{about}\n\nUsage: {usage}\n",
+    disable_help_flag = true
+)]
+pub struct WindArgs {
+    /// Print help information for `kite wind`.
+    #[arg(short = 'h', long = "help", action = ArgAction::Help, hide = true)]
     pub _help: Option<bool>,
 }
