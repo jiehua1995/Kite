@@ -3,16 +3,8 @@
 <p>
 	<img src="doc/logo.png" alt="logo" width="100" align="left">
 </p> 
+
 **Kite** is a high-performance Rust toolkit for exact k-mer counting, reusable `.kite` indexes, inspection, and downstream multi-sample analysis.
-
-Its design goal is simple:
-
-- make `count` fast
-- make `dump` fast
-- keep the `.kite` file format explicit, versioned, and reusable
-- provide built-in commands for inspection, merging, profiling, workflow reporting, and Quarto/R-based analysis
-
-Kite is positioned as an exact counter plus analysis bridge: it stores exact k-mer counts once, keeps filtering rules as editable header metadata, and lets downstream commands reuse the same index without rerunning the count stage. The `.kite` file format is documented in [`docs/file_format.md`](docs/file_format.md).
 
 ## Command Overview
 
@@ -28,19 +20,6 @@ Kite is positioned as an exact counter plus analysis bridge: it stores exact k-m
 | `kite analyze` | Build an exact multi-sample count matrix, write summary tables, and generate a Quarto report | `.kite`... | output directory |
 | `kite citation` | Print version and citation information | none | stdout |
 | `kite fly` | Run count + analyze in one command | FASTQ... | output directory |
-
-## CLI Design Principles
-
-| Principle | Meaning |
-|---|---|
-| Lightweight inspection commands | `info`, `query`, and `citation` print directly to stdout or a small output file and do not expose thread control. `info` can also edit header-only filter markers. |
-| Multi-file input style | Commands that accept multiple inputs use one `-i/--input` followed by all files, for example `-i sample1.kite sample2.kite`. |
-| Consistent sample labeling | `histo`, `profile`, `analyze`, and `fly` use `--label sample1 sample2 ...`; label count must match input count. |
-| Strict memory syntax | `count` and `fly` use `--memory`, with values like `512M`, `64G`, or `1T`. The suffix must be `M`, `G`, or `T`. |
-| Simple thread convention | Compute-heavy commands use `-t, --threads`; `0` means automatic control. Metadata-only commands stay minimal. |
-| Lazy count filters | `count --min/--max` stores filter markers in the `.kite` header without deleting raw counts. Downstream commands apply those markers when exporting or analyzing. |
-| Reporting | `merge`, `analyze`, and `fly` write Markdown reports that summarize inputs, outputs, settings, and timing. `analyze` also writes `analysis_report.qmd` for Quarto/R figures. |
-| One-shot workflow | `fly` forwards the core `count` and `analyze` options, writes a workflow report, and can keep or remove intermediate `.kite` files. |
 
 ## Build
 
@@ -135,8 +114,9 @@ Run multi-sample analysis:
   -o analysis_out \
   --correlation all \
   --embedding all \
+  --embedding-input pca \
   --heatmap-kmeans 6 \
-  --heatmap-seed 1 \
+  --seed 42 \
   --cluster-samples true
 ```
 
@@ -155,8 +135,9 @@ Run the full one-shot workflow:
   --buffer 32 \
   --correlation all \
   --embedding all \
+  --embedding-input pca \
   --heatmap-kmeans 6 \
-  --heatmap-seed 1 \
+  --seed 42 \
   --cluster-samples true
 ```
 
@@ -265,15 +246,42 @@ Compatibility requirements:
 | `-i, --input` | required | One or more `.kite` files | Use one `-i` followed by all files; builds an exact multi-sample matrix |
 | `--label` | inferred from filenames | Sample labels | Must match the number of inputs |
 | `-o, --output-dir` | required | Output directory | TSV tables, `analysis_report.md`, and `analysis_report.qmd` are written here |
-| `--correlation` | `pearson` | Correlation or distance mode | `all`, `pearson`, `spearman`, `cosine`, `euclidean`, `manhattan`, or `mahalanobis` |
+| `--correlation` | `pearson` | Correlation or distance mode | `all`, `pearson`, `spearman`, `kendall`, `cosine`, `euclidean`, `manhattan`, or `mahalanobis` |
 | `--embedding` | `pca` | Embedding mode | `all`, `pca`, `tsne`, `umap`, or `pacmap` (`pcamap` is accepted as an alias) |
-| `--heatmap-kmeans` | `6` | Number of k-means row clusters for heatmap generation | Applied to top variable k-mers |
-| `--heatmap-seed` | `1` | Random seed for heatmap k-means and stochastic embeddings | Also used for `t-SNE`, `UMAP`, and `PaCMAP` |
+| `--embedding-input` | `pca` | Input representation for non-linear embeddings | Default speed-oriented mode; use `full` to keep the original full k-mer feature matrix |
+| `--embedding-input-dims` | `50` | PCA dimensions kept for `--embedding-input pca` | Effective value is capped by sample count |
+| `--heatmap-kmeans` | `6` | Number of k-means row clusters for heatmap generation | Applied to the analyzed heatmap matrix |
+| `--seed` | `42` | Random seed for stochastic embeddings | `--heatmap-seed` is kept as a compatibility alias; the current online heatmap path is deterministic |
+| `--tsne-perplexity` | auto | t-SNE perplexity | Derived from sample count when omitted |
+| `--tsne-learning-rate` | `200.0` | t-SNE learning rate | Must be > `0` |
+| `--tsne-iterations` | `750` | t-SNE iterations | Must be >= `1` |
+| `--umap-neighbors` | auto | UMAP neighbor count | Derived from sample count when omitted |
+| `--umap-min-dist` | `0.1` | UMAP `min_dist` | Must be >= `0` |
+| `--umap-spread` | `1.0` | UMAP spread | Must be > `0` |
+| `--pacmap-neighbors` | auto | PaCMAP neighbor count | Derived from sample count when omitted |
+| `--pacmap-mn-end` | auto | PaCMAP `mn_end` | Derived from sample count when omitted |
 | `--cluster-samples` | `true` | Cluster sample columns before writing heatmap outputs | Accepts `true` or `false` |
 | `-t, --threads` | `0` | Parallel input-loading workers per partition | `0` means auto |
 | `-p, --progress` | `false` | Show progress | Recommended for larger runs |
 
 `analyze` applies each input file's header count filters before constructing the exact matrix. It writes exact tables in Rust, writes `analysis_report.md` as a static run summary, and generates `analysis_report.qmd`. Render the Quarto document when you want R/ggplot2 and ComplexHeatmap figures.
+
+Method notes:
+
+- `pca` is deterministic and has no minimum-sample fallback.
+- `tsne`, `umap`, and `pacmap` currently require at least `4` samples and a non-empty feature matrix; otherwise Kite prints a skip message, does not write the corresponding `embedding_*.tsv`, and records the skipped method in `analysis_report.md`.
+- Kite prints the effective embedding settings that were actually used, including auto-derived neighbor/perplexity values.
+- `--embedding-input pca` is the explicit speed-oriented option for `tsne`, `umap`, and `pacmap`. It leaves exact/count/correlation/heatmap tables unchanged, but it does change the non-linear embedding coordinates because those methods run on PCA-reduced sample features instead of the full k-mer matrix.
+
+Benchmark notes:
+
+- `benchmark/run_kite_test_commands.sh` uses 4 inputs by default: the two `HiChiP` FASTQ files, `test/test.fastq.gz`, and `test/test_half.fastq.gz`.
+- The script defaults to `--correlation all --embedding all --seed 42`, so it exercises the full correlation and embedding matrix when the sample count is high enough.
+
+Quarto setup notes:
+
+- Install [Quarto](https://quarto.org/) to render `analysis_report.qmd`.
+- Run `quarto install tinytex` if you want Quarto to render PDF output.
 
 ### `kite analyze` Output Files
 
@@ -283,14 +291,15 @@ Compatibility requirements:
 | `sample_summary.tsv` | Per-sample total raw counts and nonzero k-mer counts |
 | `correlation_pearson.tsv` | Written when `--correlation all` or `pearson` is selected |
 | `correlation_spearman.tsv` | Written when `--correlation all` or `spearman` is selected |
+| `correlation_kendall.tsv` | Written when `--correlation all` or `kendall` is selected |
 | `correlation_cosine.tsv` | Written when `--correlation all` or `cosine` is selected |
 | `correlation_euclidean.tsv` | Written when `--correlation all` or `euclidean` is selected |
 | `correlation_manhattan.tsv` | Written when `--correlation all` or `manhattan` is selected |
 | `correlation_mahalanobis.tsv` | Written when `--correlation all` or `mahalanobis` is selected; uses a streaming diagonal covariance approximation |
 | `embedding_pca.tsv` | Written when `--embedding all` or `pca` is selected |
-| `embedding_tsne.tsv` | Written when `--embedding all` or `tsne` is selected |
-| `embedding_umap.tsv` | Written when `--embedding all` or `umap` is selected |
-| `embedding_pacmap.tsv` | Written when `--embedding all` or `pacmap` is selected |
+| `embedding_tsne.tsv` | Written when `--embedding all` or `tsne` is selected and the method is not skipped |
+| `embedding_umap.tsv` | Written when `--embedding all` or `umap` is selected and the method is not skipped |
+| `embedding_pacmap.tsv` | Written when `--embedding all` or `pacmap` is selected and the method is not skipped |
 | `heatmap_matrix.tsv` | Row-scaled heatmap matrix with cluster assignments |
 | `heatmap_plot_matrix.tsv` | Smaller heatmap matrix used by the Quarto report |
 | `heatmap_clusters.tsv` | Heatmap cluster centroids |
@@ -301,7 +310,9 @@ Compatibility requirements:
 R-side notes:
 
 - Kite itself does not render figures.
+- Install [Quarto](https://quarto.org/) before rendering `analysis_report.qmd`; run `quarto install tinytex` when you need PDF output.
 - The generated `analysis_report.qmd` declares and installs the R packages it needs when rendered, then reads and summarizes the TSV inventory and sample summary before plotting.
+- The generated `analysis_report.qmd` includes a YAML `color_theme` parameter. Built-in choices are `anime_sky`, `sakura_mint`, `sunset_pop`, and `midnight_tokyo`; switching themes only changes styled tables and figure colors.
 - The default report saves separate PNG and PDF files for sample summaries, correlation/distance heatmaps, embeddings, and the cluster-representative heatmap with fixed figure sizes.
 - The default heatmap uses `heatmap_clusters.tsv`, shows one representative row per k-mer cluster, and includes a sample-column dendrogram when `--cluster-samples true`.
 - `heatmap_matrix.tsv` still contains one row per exact k-mer. To plot that larger exact heatmap, edit the QMD YAML and set `render_exact_kmer_heatmap: true`; exact k-mer rows are ordered but not hierarchically clustered.
@@ -333,8 +344,18 @@ R-side notes:
 | `--buffer` | `32` | Count staging buffer in MB | Same semantics as `kite count` |
 | `--correlation` | `pearson` | Correlation or distance mode passed to analyze | |
 | `--embedding` | `pca` | Embedding mode passed to analyze | |
+| `--embedding-input` | `pca` | Embedding input mode passed to analyze | `full` keeps the original full k-mer feature matrix |
+| `--embedding-input-dims` | `50` | PCA dimensions kept for `--embedding-input pca` | Effective value is capped by sample count |
 | `--heatmap-kmeans` | `6` | Heatmap row cluster count passed to analyze | |
-| `--heatmap-seed` | `1` | Random seed passed to analyze | |
+| `--seed` | `42` | Random seed passed to analyze | `--heatmap-seed` remains accepted as an alias |
+| `--tsne-perplexity` | auto | t-SNE perplexity passed to analyze | |
+| `--tsne-learning-rate` | `200.0` | t-SNE learning rate passed to analyze | |
+| `--tsne-iterations` | `750` | t-SNE iterations passed to analyze | |
+| `--umap-neighbors` | auto | UMAP neighbors passed to analyze | |
+| `--umap-min-dist` | `0.1` | UMAP `min_dist` passed to analyze | |
+| `--umap-spread` | `1.0` | UMAP spread passed to analyze | |
+| `--pacmap-neighbors` | auto | PaCMAP neighbors passed to analyze | |
+| `--pacmap-mn-end` | auto | PaCMAP `mn_end` passed to analyze | |
 | `--cluster-samples` | `true` | Sample clustering flag passed to analyze | |
 | `--keep-intermediate` | `true` | Keep intermediate `.kite` files in `databases/` after analysis | Set `false` to remove them after the report is written |
 | `-p, --progress` | `false` | Show progress | Forwarded to internal count and analyze steps |

@@ -166,10 +166,7 @@ pub fn run_histo(args: &HistoArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn merge_histograms(
-    mut left: BTreeMap<u64, u64>,
-    right: BTreeMap<u64, u64>,
-) -> BTreeMap<u64, u64> {
+fn merge_histograms(mut left: BTreeMap<u64, u64>, right: BTreeMap<u64, u64>) -> BTreeMap<u64, u64> {
     for (count, freq) in right {
         *left.entry(count).or_insert(0) += freq;
     }

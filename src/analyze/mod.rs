@@ -5,24 +5,29 @@ use std::time::Instant;
 
 use anyhow::Context;
 use faer::Mat;
+use manifolds_rs::prelude::{run_ann_search, NearestNeighbourParams};
 use manifolds_rs::{pacmap, tsne, umap, PacmapParams, TsneParams, UmapParams};
 use nalgebra::{DMatrix, SymmetricEigen};
 use rayon::{prelude::*, ThreadPoolBuilder};
 
-use crate::cli::{AnalyzeArgs, CorrelationMode, EmbeddingMode};
+use crate::cli::{AnalyzeArgs, CorrelationMode, EmbeddingInputMode, EmbeddingMode};
 use crate::kiteops::{
-    apply_reader_filter_to_rows, ensure_compatible_with_paths, for_each_union_row,
-    fill_key_buffer, format_reader_filter, infer_sample_labels, load_partition_counts,
-    open_readers, PartitionProgress,
+    apply_reader_filter_to_rows, ensure_compatible_with_paths, fill_key_buffer, for_each_union_row,
+    format_reader_filter, infer_sample_labels, load_partition_counts, open_readers,
+    PartitionProgress,
 };
 use crate::stats::print_simple_test_report;
 
 const HEATMAP_PLOT_MAX_ROWS: u64 = 5000;
+const EMBEDDING_EXHAUSTIVE_MAX_SAMPLES: usize = 64;
+
+type EmbeddingKnnGraph = (Vec<Vec<usize>>, Vec<Vec<f64>>);
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum CorrelationMethod {
     Pearson,
     Spearman,
+    Kendall,
     Cosine,
     Euclidean,
     Manhattan,
@@ -34,6 +39,7 @@ impl CorrelationMethod {
         match self {
             CorrelationMethod::Pearson => "pearson",
             CorrelationMethod::Spearman => "spearman",
+            CorrelationMethod::Kendall => "kendall",
             CorrelationMethod::Cosine => "cosine",
             CorrelationMethod::Euclidean => "euclidean",
             CorrelationMethod::Manhattan => "manhattan",
@@ -45,6 +51,7 @@ impl CorrelationMethod {
         match self {
             CorrelationMethod::Pearson => "Pearson",
             CorrelationMethod::Spearman => "Spearman",
+            CorrelationMethod::Kendall => "Kendall tau-b",
             CorrelationMethod::Cosine => "Cosine",
             CorrelationMethod::Euclidean => "Euclidean distance",
             CorrelationMethod::Manhattan => "Manhattan distance",
@@ -82,6 +89,105 @@ impl EmbeddingMethod {
 
     fn needs_dense_features(self) -> bool {
         !matches!(self, EmbeddingMethod::Pca)
+    }
+}
+
+enum EmbeddingExecutionPlan {
+    Pca,
+    Tsne {
+        min_samples: usize,
+        perplexity: f64,
+        learning_rate: f64,
+        iterations: usize,
+    },
+    Umap {
+        min_samples: usize,
+        neighbors: usize,
+        min_dist: f64,
+        spread: f64,
+    },
+    Pacmap {
+        min_samples: usize,
+        neighbors: usize,
+        mn_end: usize,
+    },
+}
+
+impl EmbeddingExecutionPlan {
+    fn method_name(&self) -> &'static str {
+        match self {
+            EmbeddingExecutionPlan::Pca => "pca",
+            EmbeddingExecutionPlan::Tsne { .. } => "tsne",
+            EmbeddingExecutionPlan::Umap { .. } => "umap",
+            EmbeddingExecutionPlan::Pacmap { .. } => "pacmap",
+        }
+    }
+
+    fn min_samples(&self) -> usize {
+        match self {
+            EmbeddingExecutionPlan::Pca => 1,
+            EmbeddingExecutionPlan::Tsne { min_samples, .. }
+            | EmbeddingExecutionPlan::Umap { min_samples, .. }
+            | EmbeddingExecutionPlan::Pacmap { min_samples, .. } => *min_samples,
+        }
+    }
+
+    fn knn_k(&self, samples: usize) -> Option<usize> {
+        match self {
+            EmbeddingExecutionPlan::Pca => None,
+            EmbeddingExecutionPlan::Tsne { perplexity, .. } => Some(
+                ((*perplexity * 3.0) as usize)
+                    .max(5)
+                    .min(samples.saturating_sub(1)),
+            ),
+            EmbeddingExecutionPlan::Umap { neighbors, .. } => Some(*neighbors),
+            EmbeddingExecutionPlan::Pacmap { mn_end, .. } => Some(*mn_end),
+        }
+    }
+
+    fn describe(&self, seed: u64, samples: usize) -> String {
+        match self {
+            EmbeddingExecutionPlan::Pca => {
+                "deterministic; min_samples=1; covariance_eigendecomposition=true".to_string()
+            }
+            EmbeddingExecutionPlan::Tsne {
+                min_samples,
+                perplexity,
+                learning_rate,
+                iterations,
+            } => format!(
+                "seed={seed}; min_samples={min_samples}; perplexity={perplexity:.4}; learning_rate={learning_rate:.4}; iterations={iterations}; init=pca; knn={}; knn_k={}",
+                embedding_ann_type(samples),
+                self.knn_k(samples).unwrap_or(0)
+            ),
+            EmbeddingExecutionPlan::Umap {
+                min_samples,
+                neighbors,
+                min_dist,
+                spread,
+            } => format!(
+                "seed={seed}; min_samples={min_samples}; neighbors={neighbors}; min_dist={min_dist:.4}; spread={spread:.4}; knn={}; knn_k={}",
+                embedding_ann_type(samples),
+                self.knn_k(samples).unwrap_or(0)
+            ),
+            EmbeddingExecutionPlan::Pacmap {
+                min_samples,
+                neighbors,
+                mn_end,
+            } => format!(
+                "seed={seed}; min_samples={min_samples}; neighbors={neighbors}; mn_end={mn_end}; init=pca; knn={}; knn_k={}; optimizer=adam_parallel",
+                embedding_ann_type(samples),
+                self.knn_k(samples).unwrap_or(0)
+            ),
+        }
+    }
+}
+
+fn embedding_ann_type(samples: usize) -> &'static str {
+    if samples <= EMBEDDING_EXHAUSTIVE_MAX_SAMPLES {
+        "exhaustive"
+    } else {
+        "kmknn"
     }
 }
 
@@ -274,7 +380,11 @@ impl DistanceAccumulator {
         {
             *left += right;
         }
-        for (left, right) in self.manhattan_sum.iter_mut().zip(other.manhattan_sum.iter()) {
+        for (left, right) in self
+            .manhattan_sum
+            .iter_mut()
+            .zip(other.manhattan_sum.iter())
+        {
             *left += right;
         }
         for (left, right) in self
@@ -327,6 +437,127 @@ fn write_spearman_tsv(columns: &[Vec<f64>], labels: &[String], path: &Path) -> a
     write_square_matrix(labels, path, |i, j, _| pearson_slice(&ranks[i], &ranks[j]))
 }
 
+fn count_inversions(values: &mut [f64], scratch: &mut [f64]) -> u128 {
+    let len = values.len();
+    if len <= 1 {
+        return 0;
+    }
+    let mid = len / 2;
+    let (left, right) = values.split_at_mut(mid);
+    let (scratch_left, scratch_right) = scratch.split_at_mut(mid);
+    let mut inversions =
+        count_inversions(left, scratch_left) + count_inversions(right, scratch_right);
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut k = 0usize;
+    while i < left.len() && j < right.len() {
+        if left[i] <= right[j] {
+            scratch[k] = left[i];
+            i += 1;
+        } else {
+            scratch[k] = right[j];
+            inversions += (left.len() - i) as u128;
+            j += 1;
+        }
+        k += 1;
+    }
+    while i < left.len() {
+        scratch[k] = left[i];
+        i += 1;
+        k += 1;
+    }
+    while j < right.len() {
+        scratch[k] = right[j];
+        j += 1;
+        k += 1;
+    }
+    values.copy_from_slice(&scratch[..len]);
+    inversions
+}
+
+fn tie_pairs_sorted(values: &[f64]) -> u128 {
+    if values.len() < 2 {
+        return 0;
+    }
+    let mut ties = 0u128;
+    let mut start = 0usize;
+    while start < values.len() {
+        let mut end = start + 1;
+        while end < values.len() && values[start] == values[end] {
+            end += 1;
+        }
+        let count = (end - start) as u128;
+        ties += count.saturating_mul(count.saturating_sub(1)) / 2;
+        start = end;
+    }
+    ties
+}
+
+fn kendall_tau_b(x: &[f64], y: &[f64]) -> f64 {
+    if x.len() != y.len() || x.len() < 2 {
+        return 0.0;
+    }
+    let mut pairs = x
+        .iter()
+        .copied()
+        .zip(y.iter().copied())
+        .collect::<Vec<_>>();
+    pairs.sort_by(|(x1, y1), (x2, y2)| x1.total_cmp(x2).then(y1.total_cmp(y2)));
+
+    let n = pairs.len() as u128;
+    let total_pairs = n.saturating_mul(n.saturating_sub(1)) / 2;
+
+    let mut ties_x = 0u128;
+    let mut ties_xy = 0u128;
+    let mut start = 0usize;
+    while start < pairs.len() {
+        let mut end = start + 1;
+        while end < pairs.len() && pairs[start].0 == pairs[end].0 {
+            end += 1;
+        }
+        let count_x = (end - start) as u128;
+        ties_x += count_x.saturating_mul(count_x.saturating_sub(1)) / 2;
+
+        let mut joint_start = start;
+        while joint_start < end {
+            let mut joint_end = joint_start + 1;
+            while joint_end < end && pairs[joint_start] == pairs[joint_end] {
+                joint_end += 1;
+            }
+            let count_xy = (joint_end - joint_start) as u128;
+            ties_xy += count_xy.saturating_mul(count_xy.saturating_sub(1)) / 2;
+            joint_start = joint_end;
+        }
+        start = end;
+    }
+
+    let mut y_sorted = pairs.iter().map(|(_, yv)| *yv).collect::<Vec<_>>();
+    y_sorted.sort_by(|a, b| a.total_cmp(b));
+    let ties_y = tie_pairs_sorted(&y_sorted);
+
+    let mut y_values = pairs.iter().map(|(_, yv)| *yv).collect::<Vec<_>>();
+    let mut scratch = vec![0.0; y_values.len()];
+    let discordant = count_inversions(&mut y_values, &mut scratch);
+
+    let numerator =
+        total_pairs as i128 - ties_x as i128 - ties_y as i128 + ties_xy as i128 - 2 * discordant as i128;
+    let denom_x = total_pairs.saturating_sub(ties_x) as f64;
+    let denom_y = total_pairs.saturating_sub(ties_y) as f64;
+    let denominator = (denom_x * denom_y).sqrt();
+    if denominator > 0.0 {
+        numerator as f64 / denominator
+    } else {
+        0.0
+    }
+}
+
+fn write_kendall_tsv(columns: &[Vec<f64>], labels: &[String], path: &Path) -> anyhow::Result<()> {
+    if columns.is_empty() {
+        return write_square_matrix(labels, path, |_, _, _| 0.0);
+    }
+    write_square_matrix(labels, path, |i, j, _| kendall_tau_b(&columns[i], &columns[j]))
+}
+
 fn pearson_slice(x: &[f64], y: &[f64]) -> f64 {
     if x.len() != y.len() || x.is_empty() {
         return 0.0;
@@ -349,9 +580,10 @@ fn pearson_slice(x: &[f64], y: &[f64]) -> f64 {
 }
 
 struct OnlineHeatmap {
-    centroids: Vec<Vec<f64>>,
+    centroids: Vec<f64>,
     counts: Vec<u64>,
     k: usize,
+    dims: usize,
 }
 
 impl OnlineHeatmap {
@@ -360,19 +592,23 @@ impl OnlineHeatmap {
             centroids: Vec::new(),
             counts: Vec::new(),
             k: k.max(1),
+            dims: 0,
         }
     }
 
-    fn assign(&mut self, values: &[f64]) -> usize {
-        let scaled = row_zscore(values);
-        if self.centroids.len() < self.k {
-            self.centroids.push(scaled);
+    fn assign_scaled(&mut self, scaled: &[f64]) -> usize {
+        if self.dims == 0 {
+            self.dims = scaled.len();
+        }
+        if self.counts.len() < self.k {
+            self.centroids.extend_from_slice(scaled);
             self.counts.push(1);
-            return self.centroids.len();
+            return self.counts.len();
         }
         let mut best = 0usize;
         let mut best_dist = f64::INFINITY;
-        for (idx, centroid) in self.centroids.iter().enumerate() {
+        for idx in 0..self.counts.len() {
+            let centroid = &self.centroids[idx * self.dims..(idx + 1) * self.dims];
             let dist = centroid
                 .iter()
                 .zip(scaled.iter())
@@ -388,7 +624,8 @@ impl OnlineHeatmap {
         }
         self.counts[best] += 1;
         let count = self.counts[best] as f64;
-        for (c, v) in self.centroids[best].iter_mut().zip(scaled.iter()) {
+        let centroid = &mut self.centroids[best * self.dims..(best + 1) * self.dims];
+        for (c, v) in centroid.iter_mut().zip(scaled.iter()) {
             *c += (*v - *c) / count;
         }
         best + 1
@@ -401,7 +638,8 @@ impl OnlineHeatmap {
             write!(out, "\t{}", label)?;
         }
         writeln!(out)?;
-        for (idx, centroid) in self.centroids.iter().enumerate() {
+        for (idx, _count) in self.counts.iter().enumerate() {
+            let centroid = &self.centroids[idx * self.dims..(idx + 1) * self.dims];
             write!(out, "{}\t{}", idx + 1, self.counts[idx])?;
             for value in centroid {
                 write!(out, "\t{:.8}", value)?;
@@ -413,11 +651,104 @@ impl OnlineHeatmap {
     }
 }
 
+fn validate_analyze_args(args: &AnalyzeArgs) -> anyhow::Result<()> {
+    if args.embedding_input_dims == 0 {
+        anyhow::bail!("--embedding-input-dims must be >= 1");
+    }
+    if let Some(perplexity) = args.tsne_perplexity {
+        if !perplexity.is_finite() || perplexity <= 0.0 {
+            anyhow::bail!("--tsne-perplexity must be > 0");
+        }
+    }
+    if !args.tsne_learning_rate.is_finite() || args.tsne_learning_rate <= 0.0 {
+        anyhow::bail!("--tsne-learning-rate must be > 0");
+    }
+    if args.tsne_iterations == 0 {
+        anyhow::bail!("--tsne-iterations must be >= 1");
+    }
+    if let Some(neighbors) = args.umap_neighbors {
+        if neighbors < 2 {
+            anyhow::bail!("--umap-neighbors must be >= 2");
+        }
+    }
+    if !args.umap_min_dist.is_finite() || args.umap_min_dist < 0.0 {
+        anyhow::bail!("--umap-min-dist must be >= 0");
+    }
+    if !args.umap_spread.is_finite() || args.umap_spread <= 0.0 {
+        anyhow::bail!("--umap-spread must be > 0");
+    }
+    if let Some(neighbors) = args.pacmap_neighbors {
+        if neighbors < 2 {
+            anyhow::bail!("--pacmap-neighbors must be >= 2");
+        }
+    }
+    if let Some(mn_end) = args.pacmap_mn_end {
+        if mn_end < 1 {
+            anyhow::bail!("--pacmap-mn-end must be >= 1");
+        }
+    }
+    Ok(())
+}
+
+fn build_embedding_plan(
+    args: &AnalyzeArgs,
+    method: EmbeddingMethod,
+    samples: usize,
+) -> EmbeddingExecutionPlan {
+    match method {
+        EmbeddingMethod::Pca => EmbeddingExecutionPlan::Pca,
+        EmbeddingMethod::Tsne => {
+            let max_perplexity = ((samples.saturating_sub(1)) / 3).max(1) as f64;
+            let perplexity = args
+                .tsne_perplexity
+                .unwrap_or(max_perplexity.min(30.0).max(1.0))
+                .clamp(1.0, max_perplexity.max(1.0));
+            EmbeddingExecutionPlan::Tsne {
+                min_samples: 4,
+                perplexity,
+                learning_rate: args.tsne_learning_rate,
+                iterations: args.tsne_iterations.max(1),
+            }
+        }
+        EmbeddingMethod::Umap => {
+            let max_neighbors = samples.saturating_sub(1).max(2);
+            let neighbors = args
+                .umap_neighbors
+                .unwrap_or(samples.saturating_sub(1).clamp(2, 15))
+                .clamp(2, max_neighbors);
+            EmbeddingExecutionPlan::Umap {
+                min_samples: 4,
+                neighbors,
+                min_dist: args.umap_min_dist,
+                spread: args.umap_spread,
+            }
+        }
+        EmbeddingMethod::Pacmap => {
+            let max_neighbors = samples.saturating_sub(1).max(2);
+            let neighbors = args
+                .pacmap_neighbors
+                .unwrap_or(samples.saturating_sub(1).clamp(2, 10))
+                .clamp(2, max_neighbors);
+            let max_mn_end = samples.saturating_sub(1).max(neighbors);
+            let mn_end = args
+                .pacmap_mn_end
+                .unwrap_or(samples.saturating_sub(1).clamp(neighbors, 50))
+                .clamp(neighbors, max_mn_end);
+            EmbeddingExecutionPlan::Pacmap {
+                min_samples: 4,
+                neighbors,
+                mn_end,
+            }
+        }
+    }
+}
+
 fn selected_correlation_methods(mode: CorrelationMode) -> Vec<CorrelationMethod> {
     match mode {
         CorrelationMode::All => vec![
             CorrelationMethod::Pearson,
             CorrelationMethod::Spearman,
+            CorrelationMethod::Kendall,
             CorrelationMethod::Cosine,
             CorrelationMethod::Euclidean,
             CorrelationMethod::Manhattan,
@@ -425,6 +756,7 @@ fn selected_correlation_methods(mode: CorrelationMode) -> Vec<CorrelationMethod>
         ],
         CorrelationMode::Pearson => vec![CorrelationMethod::Pearson],
         CorrelationMode::Spearman => vec![CorrelationMethod::Spearman],
+        CorrelationMode::Kendall => vec![CorrelationMethod::Kendall],
         CorrelationMode::Cosine => vec![CorrelationMethod::Cosine],
         CorrelationMode::Euclidean => vec![CorrelationMethod::Euclidean],
         CorrelationMode::Manhattan => vec![CorrelationMethod::Manhattan],
@@ -453,6 +785,7 @@ fn fill_transformed_values(counts: &[u64], out: &mut [f64]) {
     }
 }
 
+#[cfg(test)]
 fn row_zscore(values: &[f64]) -> Vec<f64> {
     let mean = values.iter().sum::<f64>() / values.len().max(1) as f64;
     let var = values
@@ -515,6 +848,7 @@ where
 
 pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     let started = Instant::now();
+    validate_analyze_args(args)?;
     std::fs::create_dir_all(&args.output_dir)?;
 
     let labels = infer_sample_labels(&args.inputs, args.labels.as_deref().unwrap_or(&[]))?;
@@ -586,13 +920,39 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     let markdown_report_path = out_dir.join("analysis_report.md");
     let correlation_methods = selected_correlation_methods(args.correlation);
     let embedding_methods = selected_embedding_methods(args.embedding);
-    let needs_spearman = correlation_methods.contains(&CorrelationMethod::Spearman);
+    let needs_rank_columns = correlation_methods.contains(&CorrelationMethod::Spearman)
+        || correlation_methods.contains(&CorrelationMethod::Kendall);
     let needs_distances = correlation_methods
         .iter()
         .any(|method| method.is_distance());
     let needs_dense_embedding = embedding_methods
         .iter()
         .any(|method| method.needs_dense_features());
+    let embedding_plans = embedding_methods
+        .iter()
+        .map(|method| build_embedding_plan(args, *method, labels.len()))
+        .collect::<Vec<_>>();
+    eprintln!(
+        "[kite analyze] analysis: correlation={:?}, embedding={:?}, embedding_input={:?}, embedding_input_dims={}, heatmap_kmeans={}, seed={}, cluster_samples={}",
+        args.correlation,
+        args.embedding,
+        args.embedding_input,
+        args.embedding_input_dims,
+        args.heatmap_kmeans,
+        args.seed,
+        args.cluster_samples,
+    );
+    eprintln!(
+        "[kite analyze] heatmap: online clusters={} (deterministic assignment; seed retained for stochastic embedding methods)",
+        args.heatmap_kmeans.max(1)
+    );
+    for (method, plan) in embedding_methods.iter().zip(embedding_plans.iter()) {
+        eprintln!(
+            "[kite analyze] embedding {}: {}",
+            method.slug(),
+            plan.describe(args.seed, labels.len())
+        );
+    }
 
     let mut matrix = BufWriter::new(File::create(&matrix_path)?);
     let mut heatmap_matrix = BufWriter::new(File::create(&heatmap_matrix_path)?);
@@ -614,8 +974,8 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     let mut pearson = PearsonAccumulator::new(labels.len());
     let mut cosine = CosineAccumulator::new(labels.len());
     let mut distances = needs_distances.then(|| DistanceAccumulator::new(labels.len()));
-    let mut spearman_columns =
-        needs_spearman.then(|| (0..labels.len()).map(|_| Vec::new()).collect::<Vec<_>>());
+    let mut rank_columns =
+        needs_rank_columns.then(|| (0..labels.len()).map(|_| Vec::new()).collect::<Vec<_>>());
     let mut embedding_rows: Vec<f64> = Vec::new();
     let mut heatmap = OnlineHeatmap::new(args.heatmap_kmeans);
     let mut rows_written = 0u64;
@@ -636,7 +996,7 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
                             &meta,
                             partition_id,
                             sample_count,
-                            needs_spearman,
+                            needs_rank_columns,
                             needs_dense_embedding,
                             needs_distances,
                         )
@@ -652,7 +1012,7 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
                         &meta,
                         partition_id,
                         sample_count,
-                        needs_spearman,
+                        needs_rank_columns,
                         needs_dense_embedding,
                         needs_distances,
                     )
@@ -673,7 +1033,7 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
             for (left, right) in sample_nonzero.iter_mut().zip(chunk.sample_nonzero.iter()) {
                 *left = left.saturating_add(*right);
             }
-            if let (Some(global), Some(local)) = (spearman_columns.as_mut(), chunk.spearman_columns)
+            if let (Some(global), Some(local)) = (rank_columns.as_mut(), chunk.rank_columns)
             {
                 for (dst, src) in global.iter_mut().zip(local.into_iter()) {
                     dst.extend(src);
@@ -686,9 +1046,8 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
             let mut plot_buf = Vec::new();
             for row_index in 0..chunk.row_count {
                 let offset = row_index * sample_count;
-                let values = &chunk.transformed_values[offset..offset + sample_count];
                 let scaled = &chunk.scaled_values[offset..offset + sample_count];
-                let cluster = heatmap.assign(values);
+                let cluster = heatmap.assign_scaled(scaled);
                 let kmer_start = row_index * chunk.kmer_width;
                 let kmer = &chunk.kmers[kmer_start..kmer_start + chunk.kmer_width];
                 write_heatmap_row(&mut heatmap_buf, kmer, cluster, scaled)?;
@@ -730,10 +1089,16 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
         match method {
             CorrelationMethod::Pearson => pearson.write_tsv(&labels, &path)?,
             CorrelationMethod::Spearman => {
-                let columns = spearman_columns
+                let columns = rank_columns
                     .as_ref()
                     .context("internal error: Spearman columns were not collected")?;
                 write_spearman_tsv(columns, &labels, &path)?;
+            }
+            CorrelationMethod::Kendall => {
+                let columns = rank_columns
+                    .as_ref()
+                    .context("internal error: Kendall columns were not collected")?;
+                write_kendall_tsv(columns, &labels, &path)?;
             }
             CorrelationMethod::Cosine => cosine.write_tsv(&labels, &path)?,
             CorrelationMethod::Euclidean
@@ -747,29 +1112,114 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
         }
     }
 
-    let pca_scores = pca_scores(&pearson.covariance_matrix(labels.len()), labels.len(), 2);
+    let manifold_samples = labels.len();
+    let requested_embedding_pca_dims = args.embedding_input_dims.max(1);
+    let effective_embedding_pca_dims = requested_embedding_pca_dims
+        .min(manifold_samples.saturating_sub(1).max(1));
+    let pca_basis_dims = match args.embedding_input {
+        EmbeddingInputMode::Full => 2,
+        EmbeddingInputMode::Pca => requested_embedding_pca_dims.max(2),
+    };
+    let all_pca_scores = pca_scores(
+        &pearson.covariance_matrix(labels.len()),
+        labels.len(),
+        pca_basis_dims,
+    );
+    let pca_scores = all_pca_scores
+        .iter()
+        .map(|row| {
+            let mut coords = vec![0.0; 2];
+            for dim in 0..2.min(row.len()) {
+                coords[dim] = row[dim];
+            }
+            coords
+        })
+        .collect::<Vec<_>>();
+    let manifold_features = rows_written as usize;
+    let empty_manifold_matrix = Mat::<f64>::zeros(manifold_samples, 0);
+    let manifold_matrix = if needs_dense_embedding && manifold_samples > 0 {
+        match args.embedding_input {
+            EmbeddingInputMode::Full if manifold_features > 0 => Some(Mat::from_fn(
+                manifold_samples,
+                manifold_features,
+                |sample, feature| embedding_rows[feature * manifold_samples + sample],
+            )),
+            EmbeddingInputMode::Pca => Some(Mat::from_fn(
+                manifold_samples,
+                effective_embedding_pca_dims,
+                |sample, feature| all_pca_scores[sample][feature],
+            )),
+            EmbeddingInputMode::Full => None,
+        }
+    } else {
+        None
+    };
+    let shared_manifold_knn = manifold_matrix.as_ref().and_then(|matrix| {
+        let shared_k = embedding_plans
+            .iter()
+            .filter(|plan| {
+                !matches!(plan, EmbeddingExecutionPlan::Pca) && manifold_samples >= plan.min_samples()
+            })
+            .filter_map(|plan| plan.knn_k(manifold_samples))
+            .max();
+        shared_k.map(|knn_k| {
+            let ann_type = embedding_ann_type(manifold_samples);
+            let input_note = match args.embedding_input {
+                EmbeddingInputMode::Full => "full".to_string(),
+                EmbeddingInputMode::Pca => format!(
+                    "pca(requested={}, effective={})",
+                    requested_embedding_pca_dims,
+                    matrix.ncols()
+                ),
+            };
+            eprintln!(
+                "[kite analyze] embedding manifold input={}; shared_kNN=true; ann={}; k={}; samples={}; features={}",
+                input_note,
+                ann_type,
+                knn_k,
+                manifold_samples,
+                matrix.ncols()
+            );
+            run_ann_search(
+                matrix.as_ref(),
+                knn_k,
+                ann_type.to_string(),
+                &NearestNeighbourParams::default(),
+                args.seed as usize,
+                false,
+            )
+        })
+    });
     if args.progress {
         eprintln!(
             "[kite analyze] stage 4/4: writing {} embedding table(s)",
             embedding_methods.len()
         );
     }
-    for method in &embedding_methods {
+    let mut written_embedding_methods = Vec::new();
+    let mut skipped_embedding_methods = Vec::new();
+    for (method, plan) in embedding_methods.iter().zip(embedding_plans.iter()) {
         let path = out_dir.join(format!("embedding_{}.tsv", method.slug()));
-        let scores = match method {
-            EmbeddingMethod::Pca => pca_scores.clone(),
+        let maybe_scores = match method {
+            EmbeddingMethod::Pca => Some(pca_scores.clone()),
             EmbeddingMethod::Tsne | EmbeddingMethod::Umap | EmbeddingMethod::Pacmap => {
+                let matrix = manifold_matrix.as_ref().unwrap_or(&empty_manifold_matrix);
                 manifold_embedding(
-                    &embedding_rows,
-                    rows_written as usize,
-                    labels.len(),
-                    *method,
-                    args.heatmap_seed,
+                    matrix.as_ref(),
+                    manifold_samples,
+                    plan,
+                    args.seed,
+                    shared_manifold_knn.as_ref(),
                 )
                 .with_context(|| format!("failed to compute {} embedding", method.slug()))?
             }
         };
-        write_embedding_table(&labels, &scores, *method, &path)?;
+        if let Some(scores) = maybe_scores {
+            write_embedding_table(&labels, &scores, *method, &path)?;
+            written_embedding_methods.push(*method);
+        } else {
+            skipped_embedding_methods.push(*method);
+        }
     }
 
     let mut summary = BufWriter::new(File::create(&summary_path)?);
@@ -802,6 +1252,9 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
         worker_threads,
         &correlation_methods,
         &embedding_methods,
+        &written_embedding_methods,
+        &embedding_plans,
+        &skipped_embedding_methods,
         started.elapsed().as_secs_f64(),
     )?;
 
@@ -813,7 +1266,7 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     eprintln!(
         "[kite analyze] wrote matrix, {} correlation table(s), {} embedding table(s), heatmap tables, Quarto report, and Markdown report in {:.3}s",
         correlation_labels,
-        embedding_methods.len(),
+        written_embedding_methods.len(),
         started.elapsed().as_secs_f64()
     );
     if args.test_mode {
@@ -831,7 +1284,16 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
                     format!("{:?}", args.correlation).to_lowercase(),
                 ),
                 ("embedding", format!("{:?}", args.embedding).to_lowercase()),
+                (
+                    "embedding_input",
+                    format!("{:?}", args.embedding_input).to_lowercase(),
+                ),
+                (
+                    "embedding_input_dims",
+                    args.embedding_input_dims.to_string(),
+                ),
                 ("heatmap_kmeans", args.heatmap_kmeans.to_string()),
+                ("seed", args.seed.to_string()),
                 ("cluster_samples", args.cluster_samples.to_string()),
                 (
                     "heatmap_plot_rows",
@@ -849,6 +1311,9 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+// Writes a human-readable Markdown report summarizing the analysis parameters, inputs, and outputs. It may be better to use .html format in the future, but .md is more universally viewable and can be easily converted to .html if needed.
+// [FUTURE PLAN]
+
 fn write_analysis_markdown_report(
     path: &Path,
     args: &AnalyzeArgs,
@@ -858,6 +1323,9 @@ fn write_analysis_markdown_report(
     worker_threads: usize,
     correlation_methods: &[CorrelationMethod],
     embedding_methods: &[EmbeddingMethod],
+    written_embedding_methods: &[EmbeddingMethod],
+    embedding_plans: &[EmbeddingExecutionPlan],
+    skipped_embedding_methods: &[EmbeddingMethod],
     elapsed_secs: f64,
 ) -> anyhow::Result<()> {
     let mut out = BufWriter::new(File::create(path)?);
@@ -872,6 +1340,13 @@ fn write_analysis_markdown_report(
     writeln!(out, "| Threads requested | {} |", args.threads)?;
     writeln!(out, "| Worker threads used | {} |", worker_threads)?;
     writeln!(out, "| Heatmap clusters | {} |", args.heatmap_kmeans)?;
+    writeln!(out, "| Embedding input | {:?} |", args.embedding_input)?;
+    writeln!(
+        out,
+        "| Embedding input dims | {} |",
+        args.embedding_input_dims
+    )?;
+    writeln!(out, "| Seed | {} |", args.seed)?;
     writeln!(out, "| Cluster samples | {} |", args.cluster_samples)?;
     writeln!(out, "| Elapsed seconds | {:.3} |", elapsed_secs)?;
     writeln!(out)?;
@@ -895,10 +1370,55 @@ fn write_analysis_markdown_report(
             .collect::<Vec<_>>()
             .join(", ")
     )?;
+    writeln!(
+        out,
+        "- Embedding input: {:?} (requested dims: {}).",
+        args.embedding_input,
+        args.embedding_input_dims
+    )?;
+    if !written_embedding_methods.is_empty() {
+        writeln!(
+            out,
+            "- Written embeddings: {}",
+            written_embedding_methods
+                .iter()
+                .map(|method| method.slug())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
+    }
+    for (method, plan) in written_embedding_methods.iter().filter_map(|method| {
+        embedding_methods
+            .iter()
+            .position(|candidate| candidate == method)
+            .map(|index| (method, &embedding_plans[index]))
+    }) {
+        writeln!(
+            out,
+            "- Embedding `{}` settings: {}",
+            method.slug(),
+            plan.describe(args.seed, labels.len())
+        )?;
+    }
+    if !skipped_embedding_methods.is_empty() {
+        writeln!(
+            out,
+            "- Skipped embeddings: {}",
+            skipped_embedding_methods
+                .iter()
+                .map(|method| method.slug())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
+    }
     writeln!(out, "- Count transform: `log1p(raw_count)`.")?;
     writeln!(
         out,
         "- Mahalanobis mode, when selected, uses a streaming diagonal covariance approximation."
+    )?;
+    writeln!(
+        out,
+        "- Manifold embeddings are skipped when sample count is below the method minimum or when the feature matrix is empty."
     )?;
     writeln!(out)?;
     writeln!(out, "## Inputs")?;
@@ -962,7 +1482,7 @@ fn write_analysis_markdown_report(
             .unwrap_or(0);
         writeln!(out, "| `{}` | {} |", name, size)?;
     }
-    for method in embedding_methods {
+    for method in written_embedding_methods {
         let name = format!("embedding_{}.tsv", method.slug());
         let file_path = Path::new(&args.output_dir).join(&name);
         let size = std::fs::metadata(&file_path)
@@ -976,7 +1496,12 @@ fn write_analysis_markdown_report(
     Ok(())
 }
 
-fn write_heatmap_row<W: Write>(out: &mut W, kmer: &[u8], cluster: usize, scaled: &[f64]) -> anyhow::Result<()> {
+fn write_heatmap_row<W: Write>(
+    out: &mut W,
+    kmer: &[u8],
+    cluster: usize,
+    scaled: &[f64],
+) -> anyhow::Result<()> {
     out.write_all(kmer)?;
     write!(out, "\t{}", cluster)?;
     for value in scaled {
@@ -986,7 +1511,11 @@ fn write_heatmap_row<W: Write>(out: &mut W, kmer: &[u8], cluster: usize, scaled:
     Ok(())
 }
 
-fn append_exact_matrix_row<W: Write>(out: &mut W, kmer: &[u8], counts: &[u64]) -> anyhow::Result<()> {
+fn append_exact_matrix_row<W: Write>(
+    out: &mut W,
+    kmer: &[u8],
+    counts: &[u64],
+) -> anyhow::Result<()> {
     out.write_all(kmer)?;
     for count in counts {
         write!(out, "\t{}", count)?;
@@ -1071,68 +1600,75 @@ fn pca_scores(cov: &[f64], n: usize, dims: usize) -> Vec<Vec<f64>> {
 }
 
 fn manifold_embedding(
-    feature_rows: &[f64],
-    features: usize,
+    matrix: faer::MatRef<'_, f64>,
     samples: usize,
-    method: EmbeddingMethod,
+    plan: &EmbeddingExecutionPlan,
     seed: u64,
-) -> anyhow::Result<Vec<Vec<f64>>> {
+    precomputed_knn: Option<&EmbeddingKnnGraph>,
+) -> anyhow::Result<Option<Vec<Vec<f64>>>> {
     if samples == 0 {
-        return Ok(Vec::new());
+        return Ok(None);
     }
-    if samples < 4 || feature_rows.is_empty() || features == 0 {
+    if samples < plan.min_samples() || matrix.ncols() == 0 {
+        let method = plan.method_name();
         eprintln!(
-            "[kite analyze] {} needs at least 4 samples and non-empty features; writing zero coordinates",
-            method.slug()
+            "[kite analyze] skipping {}: needs at least {} samples and non-empty features",
+            method,
+            plan.min_samples()
         );
-        return Ok(vec![vec![0.0; 2]; samples]);
+        return Ok(None);
     }
-    let matrix = Mat::from_fn(samples, features, |sample, feature| {
-        feature_rows[feature * samples + sample]
-    });
     let seed = seed as usize;
-    let embedding = match method {
-        EmbeddingMethod::Tsne => {
-            let max_perplexity = ((samples - 1) / 3).max(1) as f64;
-            let perplexity = max_perplexity.min(30.0).max(1.0);
+    let embedding = match plan {
+        EmbeddingExecutionPlan::Tsne {
+            perplexity,
+            learning_rate,
+            iterations,
+            ..
+        } => {
             let params = TsneParams::new(
                 Some(2),
-                Some(perplexity),
+                Some(*perplexity),
                 None,
-                Some(200.0),
-                Some(750),
-                Some("kmknn".to_string()),
+                Some(*learning_rate),
+                Some(*iterations),
+                Some(embedding_ann_type(samples).to_string()),
                 Some(0.5),
                 Some(3),
             );
-            tsne(matrix.as_ref(), None, &params, "bh", seed, false)?
+            tsne(matrix, precomputed_knn.cloned(), &params, "bh", seed, false)?
         }
-        EmbeddingMethod::Umap => {
-            let k = (samples - 1).clamp(2, 15);
-            let params = UmapParams::default_2d(Some(2), Some(k), Some(0.1), Some(1.0));
-            umap(matrix.as_ref(), None, &params, seed, false)?
+        EmbeddingExecutionPlan::Umap {
+            neighbors,
+            min_dist,
+            spread,
+            ..
+        } => {
+            let params =
+                UmapParams::default_2d(Some(2), Some(*neighbors), Some(*min_dist), Some(*spread));
+            umap(matrix, precomputed_knn.cloned(), &params, seed, false)?
         }
-        EmbeddingMethod::Pacmap => {
-            let k = (samples - 1).clamp(2, 10);
-            let mn_end = (samples - 1).clamp(k, 50);
+        EmbeddingExecutionPlan::Pacmap {
+            neighbors, mn_end, ..
+        } => {
             let params = PacmapParams::new(
                 Some(2),
-                Some(k),
-                Some("kmknn".to_string()),
+                Some(*neighbors),
+                Some(embedding_ann_type(samples).to_string()),
                 Some("adam_parallel".to_string()),
                 None,
                 None,
                 None,
-                Some(mn_end),
+                Some(*mn_end),
                 Some("pca".to_string()),
                 None,
                 None,
             );
-            pacmap(matrix.as_ref(), None, &params, seed, false)?
+            pacmap(matrix, precomputed_knn.cloned(), &params, seed, false)?
         }
-        EmbeddingMethod::Pca => unreachable!("PCA does not use manifold_embedding"),
+        EmbeddingExecutionPlan::Pca => unreachable!("PCA does not use manifold_embedding"),
     };
-    embedding_to_scores(embedding, samples)
+    embedding_to_scores(embedding, samples).map(Some)
 }
 
 fn embedding_to_scores(embedding: Vec<Vec<f64>>, samples: usize) -> anyhow::Result<Vec<Vec<f64>>> {
@@ -1191,9 +1727,8 @@ struct PartitionAnalyzeChunk {
     pearson: PearsonAccumulator,
     cosine: CosineAccumulator,
     distances: Option<DistanceAccumulator>,
-    spearman_columns: Option<Vec<Vec<f64>>>,
+    rank_columns: Option<Vec<Vec<f64>>>,
     embedding_values: Vec<f64>,
-    transformed_values: Vec<f64>,
     scaled_values: Vec<f64>,
     row_count: usize,
 }
@@ -1203,7 +1738,7 @@ fn build_analyze_partition_chunk(
     meta: &crate::kiteops::CompatibleMetadata,
     partition_id: usize,
     sample_count: usize,
-    needs_spearman: bool,
+    needs_rank_columns: bool,
     needs_dense_embedding: bool,
     needs_distances: bool,
 ) -> anyhow::Result<PartitionAnalyzeChunk> {
@@ -1222,10 +1757,9 @@ fn build_analyze_partition_chunk(
     let mut pearson = PearsonAccumulator::new(sample_count);
     let mut cosine = CosineAccumulator::new(sample_count);
     let mut distances = needs_distances.then(|| DistanceAccumulator::new(sample_count));
-    let mut spearman_columns =
-        needs_spearman.then(|| (0..sample_count).map(|_| Vec::new()).collect::<Vec<_>>());
+    let mut rank_columns =
+        needs_rank_columns.then(|| (0..sample_count).map(|_| Vec::new()).collect::<Vec<_>>());
     let mut embedding_values = Vec::new();
-    let mut transformed_values = Vec::with_capacity(row_count_estimate * sample_count);
     let mut scaled_values = Vec::with_capacity(row_count_estimate * sample_count);
     let mut values = vec![0.0; sample_count];
     let mut scaled = vec![0.0; sample_count];
@@ -1246,13 +1780,12 @@ fn build_analyze_partition_chunk(
         if let Some(distances) = distances.as_mut() {
             distances.update(&values);
         }
-        if let Some(columns) = spearman_columns.as_mut() {
+        if let Some(columns) = rank_columns.as_mut() {
             push_columns(columns, &values);
         }
         if needs_dense_embedding {
             embedding_values.extend(values.iter().copied());
         }
-        transformed_values.extend(values.iter().copied());
         fill_row_zscore(&values, &mut scaled);
         scaled_values.extend(scaled.iter().copied());
         Ok(())
@@ -1268,9 +1801,8 @@ fn build_analyze_partition_chunk(
         pearson,
         cosine,
         distances,
-        spearman_columns,
+        rank_columns,
         embedding_values,
-        transformed_values,
         scaled_values,
         row_count,
     })
@@ -1283,6 +1815,7 @@ fn render_quarto_document(
     heatmap_kmeans: usize,
     cluster_samples: bool,
 ) -> String {
+    let subtitle = yaml_double_quoted(&generated_by_subtitle());
     let label_list = labels
         .iter()
         .map(|label| format!("\"{}\"", label.replace('"', "\\\"")))
@@ -1301,7 +1834,7 @@ fn render_quarto_document(
     format!(
         r##"---
 title: "Kite Analyze Report"
-subtitle: "TSV-first k-mer comparison workflow"
+subtitle: "{subtitle}"
 
 format:
   html:
@@ -1309,7 +1842,7 @@ format:
     toc-depth: 3
     toc-location: left
     section-divs: true
-    code-fold: false
+    code-fold: true
     code-tools: true
     code-line-numbers: true
     code-copy: hover
@@ -1338,6 +1871,7 @@ params:
   samples: [{label_list}]
   correlation_tables: "{correlation_list}"
   embedding_tables: "{embedding_list}"
+  color_theme: "anime_sky"
   heatmap_kmeans: {heatmap_kmeans}
   cluster_samples: {cluster_samples}
   render_exact_kmer_heatmap: false
@@ -1348,6 +1882,17 @@ params:
 # Kite analyze
 
 This notebook is generated by `kite analyze`. The command itself writes TSV tables only by default. Render this document with [quarto](https://quarto.org/) when you want publication-style figures.
+
+## Report theme
+
+The YAML header exposes `color_theme`, so readers can switch visual style without regenerating TSV tables. Built-in choices are:
+
+- `anime_sky`: airy blue-pink default
+- `sakura_mint`: pastel pink and mint
+- `sunset_pop`: peach, gold, and coral
+- `midnight_tokyo`: navy, cyan, and neon rose
+
+Only the rendered figures and styled tables change; the underlying analysis tables stay identical.
 
 ## Runtime requirements
 
@@ -1360,17 +1905,21 @@ Recommended minimums for this notebook:
 | ggplot2 | 4.0.0 |
 | dplyr | 1.1.0 |
 | tidyr | 1.3.0 |
+| gt | 0.11.1 |
+| ggrepel | 0.9.6 |
 | patchwork | 1.2.0 |
 | scales | 1.4.0 |
 | ComplexHeatmap | 2.18.0 |
 | circlize | 0.4.16 |
 
-```{{r}}
+```{{r package_setup}}
 cran_packages <- c(
   data.table = "1.15.0",
   ggplot2 = "4.0.0",
   dplyr = "1.1.0",
   tidyr = "1.3.0",
+  gt = "0.11.1",
+  ggrepel = "0.9.6",
   patchwork = "1.2.0",
   scales = "1.4.0",
   circlize = "0.4.16"
@@ -1427,12 +1976,14 @@ if (length(bioc_to_install) > 0) {{
 }}
 ```
 
-```{{r}}
+```{{r report_helpers}}
 suppressPackageStartupMessages({{
   library(data.table)
   library(ggplot2)
   library(dplyr)
   library(tidyr)
+  library(gt)
+  library(ggrepel)
   library(patchwork)
   library(scales)
   library(ComplexHeatmap)
@@ -1472,7 +2023,7 @@ save_heatmap <- function(ht, filename, width = 9, height = 6, dpi = 320) {{
 kite_theme <- function(base_size = 12) {{
   theme_bw(base_size = base_size, base_family = "sans") +
     theme(
-      text = element_text(family = "sans", color = "#000000"),
+      text = element_text(family = "sans", color = pal$ink),
 
       plot.title.position = "plot",
       plot.title = element_text(
@@ -1480,24 +2031,24 @@ kite_theme <- function(base_size = 12) {{
         face = "bold",
         size = rel(1.15),
         hjust = 0.5,
-        color = "#000000",
+        color = pal$ink,
         margin = margin(b = 8)
       ),
       plot.subtitle = element_text(
         family = "sans",
-        color = "#000000",
+        color = pal$ink,
         hjust = 0.5
       ),
       plot.caption = element_text(
         family = "sans",
-        color = "#000000"
+        color = pal$ink
       ),
 
       panel.grid.major = element_blank(),
       panel.grid.minor = element_blank(),
 
       panel.border = element_rect(
-        color = "#000000",
+        color = pal$border,
         fill = NA,
         linewidth = 0.35
       ),
@@ -1505,25 +2056,25 @@ kite_theme <- function(base_size = 12) {{
       axis.line = element_blank(),
       axis.title = element_text(
         family = "sans",
-        color = "#000000"
+        color = pal$ink
       ),
       axis.text = element_text(
         family = "sans",
-        color = "#000000"
+        color = pal$ink
       ),
       axis.ticks = element_line(
-        color = "#000000",
+        color = pal$border,
         linewidth = 0.3
       ),
       axis.ticks.length = unit(2, "pt"),
 
       legend.title = element_text(
         family = "sans",
-        color = "#000000"
+        color = pal$ink
       ),
       legend.text = element_text(
         family = "sans",
-        color = "#000000"
+        color = pal$ink
       ),
       legend.key = element_rect(fill = "transparent", color = NA),
       legend.background = element_rect(fill = "transparent", color = NA),
@@ -1531,21 +2082,170 @@ kite_theme <- function(base_size = 12) {{
 
       strip.text = element_text(
         family = "sans",
-        color = "#000000",
+        color = pal$ink,
         face = "bold"
       ),
       strip.background = element_rect(
         fill = "transparent",
-        color = "#000000",
+        color = pal$border,
         linewidth = 0.35
       ),
 
-      plot.background = element_rect(fill = "transparent", color = NA),
-      panel.background = element_rect(fill = "transparent", color = NA)
+      plot.background = element_rect(fill = pal$page_bg, color = NA),
+      panel.background = element_rect(fill = pal$panel_bg, color = NA)
     )
 }}
 
 short_number <- scales::label_number(scale_cut = scales::cut_short_scale())
+human_size <- function(bytes) {{
+  ifelse(
+    is.na(bytes),
+    NA_character_,
+    ifelse(
+      bytes < 1024,
+      paste0(bytes, " B"),
+      ifelse(
+        bytes < 1024^2,
+        paste0(round(bytes / 1024, 1), " KB"),
+        ifelse(
+          bytes < 1024^3,
+          paste0(round(bytes / 1024^2, 2), " MB"),
+          paste0(round(bytes / 1024^3, 2), " GB")
+        )
+      )
+    )
+  )
+}}
+
+theme_palette <- function(name) {{
+  palettes <- list(
+    anime_sky = list(
+      page_bg = "#FCFBFF",
+      panel_bg = "#FDFBFF",
+      ink = "#000000",
+      border = "#000000",
+      accent = "#69B7FF",
+      accent_soft = "#AFC8FF",
+      accent2 = "#FF9BC2",
+      accent2_soft = "#FFD4E7",
+      bar_primary = "#79B8FF",
+      bar_secondary = "#80D7C4",
+      matrix_low = "#D8ECFF",
+      matrix_mid = "#FFFDFE",
+      matrix_high = "#FFE7A8",
+      heatmap_low = "#8FC7FF",
+      heatmap_mid = "#FFFDFE",
+      heatmap_high = "#FF9DB8",
+      segment = "#AFC8FF"
+    ),
+    sakura_mint = list(
+      page_bg = "#FFFDFD",
+      panel_bg = "#FFF9FB",
+      ink = "#000000",
+      border = "#000000",
+      accent = "#6BC9B8",
+      accent_soft = "#C5EFE7",
+      accent2 = "#F58FB5",
+      accent2_soft = "#FFD7E7",
+      bar_primary = "#F6A5C0",
+      bar_secondary = "#7FD6C2",
+      matrix_low = "#D9F5F0",
+      matrix_mid = "#FFFDFD",
+      matrix_high = "#FFE3B3",
+      heatmap_low = "#8ED9C8",
+      heatmap_mid = "#FFFDFD",
+      heatmap_high = "#F49BBC",
+      segment = "#A9DED3"
+    ),
+    sunset_pop = list(
+      page_bg = "#FFFCF8",
+      panel_bg = "#FFF8F0",
+      ink = "#000000",
+      border = "#000000",
+      accent = "#FF9F6E",
+      accent_soft = "#FFD1A8",
+      accent2 = "#FF6FA5",
+      accent2_soft = "#FFD4E3",
+      bar_primary = "#FFB26B",
+      bar_secondary = "#FF8FA3",
+      matrix_low = "#D7ECFF",
+      matrix_mid = "#FFFDF9",
+      matrix_high = "#FFE59A",
+      heatmap_low = "#91C9FF",
+      heatmap_mid = "#FFFDF9",
+      heatmap_high = "#FF8FA3",
+      segment = "#FFC8A2"
+    ),
+    midnight_tokyo = list(
+      page_bg = "#F7FAFF",
+      panel_bg = "#F2F7FF",
+      ink = "#000000",
+      border = "#000000",
+      accent = "#5EC8FF",
+      accent_soft = "#A9DFFF",
+      accent2 = "#FF6FB5",
+      accent2_soft = "#FFC2DE",
+      bar_primary = "#5EC8FF",
+      bar_secondary = "#9A8CFF",
+      matrix_low = "#D5E7FF",
+      matrix_mid = "#F8FBFF",
+      matrix_high = "#FFE48A",
+      heatmap_low = "#6AB5FF",
+      heatmap_mid = "#F8FBFF",
+      heatmap_high = "#FF7AB8",
+      segment = "#8DB8FF"
+    )
+  )
+
+  if (!name %in% names(palettes)) {{
+    warning("Unknown color_theme: ", name, "; falling back to anime_sky")
+    name <- "anime_sky"
+  }}
+
+  palettes[[name]]
+}}
+
+pal <- theme_palette(params$color_theme)
+
+pretty_table <- function(df, title = NULL, digits = 3) {{
+  numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+  tab <- gt::gt(df)
+  if (!is.null(title)) {{
+    tab <- gt::tab_header(tab, title = gt::md(title))
+  }}
+  if (length(numeric_cols) > 0) {{
+    tab <- gt::fmt_number(
+      tab,
+      columns = dplyr::all_of(numeric_cols),
+      decimals = digits,
+      drop_trailing_zeros = TRUE
+    )
+  }}
+  tab |>
+    gt::tab_options(
+      table.width = gt::pct(100),
+      heading.align = "left",
+      table.font.names = c("Source Sans Pro", "Helvetica", "Arial", "sans-serif"),
+      table.background.color = "white",
+      table.border.top.color = "#000000",
+      table.border.bottom.color = "#000000",
+      table.border.top.style = "solid",
+      table.border.bottom.style = "solid",
+      heading.background.color = "white",
+      heading.border.bottom.color = "#000000",
+      heading.title.font.weight = "bold",
+      heading.title.font.color = "#000000",
+      column_labels.background.color = "white",
+      column_labels.font.weight = "bold",
+      column_labels.font.color = "#000000",
+      column_labels.border.bottom.color = "#000000",
+      column_labels.border.bottom.style = "solid",
+      data_row.padding = gt::px(5),
+      table.font.color = "#000000",
+      table_body.hlines.color = "#000000",
+      table_body.hlines.style = "solid"
+    )
+}}
 ```
 
 ## Output figure sizes
@@ -1564,8 +2264,12 @@ report can be used without manual resizing.
 # Input tables
 
 `exact_count_matrix.tsv` contains raw exact k-mer counts by sample. This file can be very large, so most plotting below uses summary tables instead.
+This section is meant to answer two simple questions before any interpretation:
 
-```{{r}}
+1. Which tables did `kite analyze` actually produce for this run?
+2. Which of those tables are small summaries versus very large matrices?
+
+```{{r table_inventory}}
 expected_tables <- c(
   "exact_count_matrix.tsv",
   "sample_summary.tsv",
@@ -1581,7 +2285,8 @@ table_inventory <- data.frame(
 ) |>
   dplyr::mutate(
     path = file.path(out_dir, file),
-    size_mb = round(file.info(path)$size / 1024^2, 3),
+    size_bytes = file.info(path)$size,
+    size = human_size(size_bytes),
     role = dplyr::case_when(
       file == "exact_count_matrix.tsv" ~ "raw exact k-mer matrix",
       file == "sample_summary.tsv" ~ "sample totals and nonzero rows",
@@ -1594,50 +2299,68 @@ table_inventory <- data.frame(
       TRUE ~ "other"
     )
   ) |>
-  dplyr::select(file, role, size_mb)
+  dplyr::select(file, role, size)
 
 missing_tables <- setdiff(expected_tables, table_inventory$file)
 if (length(missing_tables) > 0) {{
   warning("Missing expected Kite analyze table(s): ", paste(missing_tables, collapse = ", "))
 }}
 
-table_inventory
+pretty_table(table_inventory, "Table inventory", digits = 3)
 ```
 
-```{{r}}
+`sample_summary.tsv` is the smallest per-sample overview table. It is usually the fastest place to check whether one sample is much deeper, much sparser, or obviously inconsistent with the others.
+
+```{{r sample_overview}}
 sample_summary <- read_kite_tsv("sample_summary.tsv")
 heatmap_sample_order <- read_kite_tsv("heatmap_samples.tsv")
 sample_overview <- sample_summary |>
   dplyr::left_join(heatmap_sample_order, by = "sample") |>
-  dplyr::arrange(order)
+  dplyr::arrange(order) |>
+  dplyr::rename(
+    heatmap_order = order
+  )
 
-sample_overview
+pretty_table(sample_overview, "Sample overview", digits = 3)
 ```
 
 ## Sample information
 
-```{{r}}
-sample_overview |>
-  dplyr::summarise(
-    samples = dplyr::n(),
-    total_raw_counts = sum(total_raw_counts),
-    median_raw_counts = median(total_raw_counts),
-    median_nonzero_kmers = median(nonzero_kmers)
-  )
+This summary compresses the sample table into run-level quantities. The names below are intentionally explicit:
+
+- `samples`: how many input samples were analyzed
+- `total_raw_counts_across_samples`: the combined count mass across all samples
+- `median_raw_counts_per_sample`: the median library size across samples
+- `median_nonzero_kmers_per_sample`: the median number of nonzero k-mers across samples
+
+```{{r sample_summary_stats}}
+pretty_table(
+  sample_overview |>
+    dplyr::summarise(
+      samples = dplyr::n(),
+      total_raw_counts_across_samples = sum(total_raw_counts),
+      median_raw_counts_per_sample = median(total_raw_counts),
+      median_nonzero_kmers_per_sample = median(nonzero_kmers)
+    ),
+  "Sample summary statistics",
+  digits = 3
+)
 ```
 
 ## Sample summary plots
 
-```{{r}}
+These two bar plots answer the most basic QC question: do the samples have broadly similar total signal and broadly similar support size, or is one sample clearly deeper or sparser than the rest?
+
+```{{r sample_summary_plots}}
 p_summary <- ggplot(sample_summary, aes(sample, total_raw_counts)) +
-  geom_col(fill = "#4C78A8", width = 0.72) +
+  geom_col(fill = pal$bar_primary, width = 0.72) +
   scale_y_continuous(labels = short_number) +
   labs(x = NULL, y = "Total raw counts", title = "Total k-mer counts per sample") +
   kite_theme(base_size = 12) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 p_nonzero <- ggplot(sample_summary, aes(sample, nonzero_kmers)) +
-  geom_col(fill = "#59A14F", width = 0.72) +
+  geom_col(fill = pal$bar_secondary, width = 0.72) +
   scale_y_continuous(labels = short_number) +
   labs(x = NULL, y = "Nonzero k-mers", title = "Nonzero k-mers per sample") +
   kite_theme(base_size = 12) +
@@ -1646,7 +2369,7 @@ p_nonzero <- ggplot(sample_summary, aes(sample, nonzero_kmers)) +
 p_summary / p_nonzero
 ```
 
-```{{r}}
+```{{r save_sample_summary_plots}}
 save_plot(p_summary, "sample_summary.png", width = 8, height = 5)
 save_plot(p_summary, "sample_summary.pdf", width = 8, height = 5)
 save_plot(p_nonzero, "sample_nonzero_kmers.png", width = 8, height = 5)
@@ -1656,23 +2379,70 @@ save_plot(p_nonzero, "sample_nonzero_kmers.pdf", width = 8, height = 5)
 # Correlation
 
 The generated correlation and distance tables are: `{correlation_list}`. The default command writes only `correlation_pearson.tsv`; use `--correlation all` or a specific method to write additional tables.
+Read this section as a sample-to-sample relationship overview:
 
-```{{r}}
-plot_correlation <- function(
+- `pearson`, `spearman`, `kendall`, and `cosine` are similarity-style summaries
+- `euclidean`, `manhattan`, and `mahalanobis` are distance/score-style summaries
+
+For the similarity-style matrices, values closer to `1` indicate more similar samples, values near `0` indicate weak agreement, and negative values indicate opposing trends. For the distance-style matrices, smaller values indicate more similar samples.
+
+```{{r correlation_plots}}
+base_matrix_plot <- function(
+  long,
   name,
-  distance_option = "magma",
+  fill_label,
+  fill_scale,
+  label_digits = 2,
+  label_size = 3
+) {{
+  ggplot(long, aes(sample_x, sample_y, fill = value)) +
+    geom_tile(
+      color = "white",
+      linewidth = 0.4
+    ) +
+    geom_text(
+      aes(label = label),
+      family = "sans",
+      size = label_size,
+      color = pal$ink
+    ) +
+    coord_equal() +
+    labs(
+      x = NULL,
+      y = NULL,
+      fill = fill_label,
+      title = sub("\\.tsv$", "", name)
+    ) +
+    fill_scale +
+    kite_theme(base_size = 12) +
+    theme(
+      axis.text.x = element_text(
+        angle = 45,
+        hjust = 1,
+        vjust = 1,
+        color = pal$ink,
+        family = "sans"
+      ),
+      axis.text.y = element_text(
+        color = pal$ink,
+        family = "sans"
+      ),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      legend.key = element_rect(fill = "transparent", color = NA),
+      legend.background = element_rect(fill = "transparent", color = NA),
+      legend.box.background = element_rect(fill = "transparent", color = NA)
+    )
+}}
+
+plot_similarity_matrix <- function(
+  name,
   label_digits = 2,
   label_size = 3
 ) {{
   df <- read_kite_tsv(name)
 
   labels <- colnames(df)[-1]
-
-  is_distance <- grepl(
-    "euclidean|manhattan|mahalanobis",
-    name,
-    ignore.case = TRUE
-  )
 
   long <- df |>
     tidyr::pivot_longer(
@@ -1686,72 +2456,70 @@ plot_correlation <- function(
       label = sprintf(paste0("%.", label_digits, "f"), value)
     )
 
-  p <- ggplot(long, aes(sample_x, sample_y, fill = value)) +
-    geom_tile(
-      color = "white",
-      linewidth = 0.4
-    ) +
-    geom_text(
-      aes(label = label),
-      family = "sans",
-      size = label_size,
-      color = "#000000"
-    ) +
-    coord_equal() +
-    labs(
-      x = NULL,
-      y = NULL,
-      fill = ifelse(is_distance, "distance", "correlation"),
-      title = sub("\\.tsv$", "", name)
-    ) +
-    kite_theme(base_size = 12) +
-    theme(
-      axis.text.x = element_text(
-        angle = 45,
-        hjust = 1,
-        vjust = 1,
-        color = "#000000",
-        family = "sans"
-      ),
-      axis.text.y = element_text(
-        color = "#000000",
-        family = "sans"
-      ),
-      panel.grid.major = element_blank(),
-      panel.grid.minor = element_blank(),
-      legend.key = element_rect(fill = "transparent", color = NA),
-      legend.background = element_rect(fill = "transparent", color = NA),
-      legend.box.background = element_rect(fill = "transparent", color = NA)
+  fill_scale <- if (min(long$value, na.rm = TRUE) < 0 && max(long$value, na.rm = TRUE) > 0) {{
+    scale_fill_gradient2(
+      low = pal$matrix_low,
+      mid = pal$matrix_mid,
+      high = pal$matrix_high,
+      midpoint = 0,
+      oob = scales::squish
+    )
+  }} else {{
+    scale_fill_gradient(
+      low = pal$matrix_low,
+      high = pal$matrix_high,
+      oob = scales::squish
+    )
+  }}
+
+  base_matrix_plot(long, name, "correlation", fill_scale, label_digits, label_size)
+}}
+
+plot_score_matrix <- function(
+  name,
+  label_digits = 2,
+  label_size = 3
+) {{
+  df <- read_kite_tsv(name)
+  labels <- colnames(df)[-1]
+  long <- df |>
+    tidyr::pivot_longer(
+      cols = -sample,
+      names_to = "sample_x",
+      values_to = "value"
+    ) |>
+    dplyr::mutate(
+      sample_x = factor(sample_x, levels = labels),
+      sample_y = factor(sample, levels = rev(labels)),
+      label = sprintf(paste0("%.", label_digits, "f"), value)
     )
 
-  if (is_distance) {{
-    p +
-      scale_fill_viridis_c(
-        option = distance_option,
-        direction = -1,
-        oob = scales::squish
-      )
-  }} else {{
-    p +
-      scale_fill_gradient(
-        low = "#D6EAF8",   # light blue
-        high = "#FAD7A0",  # light orange
-        oob = scales::squish
-      )
-  }}
+  fill_scale <- scale_fill_gradient(
+    low = pal$matrix_low,
+    high = pal$matrix_high,
+    oob = scales::squish
+  )
+
+  base_matrix_plot(long, name, "score", fill_scale, label_digits, label_size)
 }}
 
 correlation_files <- Sys.glob(file.path(out_dir, "correlation_*.tsv"))
 
 correlation_plots <- setNames(
-  lapply(basename(correlation_files), plot_correlation),
+  lapply(basename(correlation_files), function(name) {{
+    if (grepl("euclidean|manhattan|mahalanobis", name, ignore.case = TRUE)) {{
+      plot_score_matrix(name)
+    }} else {{
+      plot_similarity_matrix(name)
+    }}
+  }}),
   sub("\\.tsv$", "", basename(correlation_files))
 )
 
 correlation_plots
 ```
 
-```{{r}}
+```{{r save_correlation_plots}}
 for (name in names(correlation_plots)) {{
   save_plot(correlation_plots[[name]], paste0(name, ".png"), width = 7.5, height = 6.5)
   save_plot(correlation_plots[[name]], paste0(name, ".pdf"), width = 7.5, height = 6.5)
@@ -1760,22 +2528,53 @@ for (name in names(correlation_plots)) {{
 
 # Embedding
 
-The generated embedding tables are: `{embedding_list}`. Each table contains `sample`, `method`, `dim1`, and `dim2`.
+Requested embedding tables: `{embedding_list}`. Kite reads and plots whichever `embedding_*.tsv` files are available; methods skipped because of sample-count or feature-matrix limits simply do not produce a table.
+This section turns the sample-to-sample relationships into a 2D view. Points that fall close together are more similar under that embedding; points that separate strongly are more distinct. Different embedding methods emphasize different structure, so this section is best read comparatively rather than as a single absolute answer.
+The label layer uses repel-based placement so sample names remain readable even when points are close together.
 
-```{{r}}
+```{{r embedding_plots}}
 plot_embedding <- function(name, point_size = 3.2, label_size = 3.4) {{
   df <- read_kite_tsv(name)
   ggplot(df, aes(dim1, dim2, label = sample)) +
-    geom_hline(yintercept = 0, color = "#D9D9D9", linewidth = 0.35) +
-    geom_vline(xintercept = 0, color = "#D9D9D9", linewidth = 0.35) +
-    geom_point(size = point_size, color = "#4C78A8", alpha = 0.9) +
-    geom_text(
-      nudge_y = 0.05 * max(diff(range(df$dim2, na.rm = TRUE)), 1),
-      size = label_size,
-      color = "#333333"
+    geom_hline(yintercept = 0, color = pal$accent_soft, linewidth = 0.4) +
+    geom_vline(xintercept = 0, color = pal$accent_soft, linewidth = 0.4) +
+    geom_point(
+      size = point_size + 1.1,
+      color = pal$matrix_mid,
+      alpha = 0.95
     ) +
-    labs(x = "dim1", y = "dim2", title = sub("\\.tsv$", "", name)) +
-    kite_theme(base_size = 12)
+    geom_point(
+      size = point_size,
+      color = pal$accent,
+      fill = pal$accent2,
+      shape = 21,
+      stroke = 0.7,
+      alpha = 0.95
+    ) +
+    ggrepel::geom_label_repel(
+      size = label_size,
+      color = pal$ink,
+      fill = scales::alpha(pal$matrix_mid, 0.92),
+      label.size = 0.18,
+      label.padding = grid::unit(0.12, "lines"),
+      box.padding = grid::unit(0.28, "lines"),
+      point.padding = grid::unit(0.18, "lines"),
+      segment.color = pal$segment,
+      segment.size = 0.3,
+      seed = 42,
+      max.overlaps = Inf
+    ) +
+    labs(
+      x = "dim1",
+      y = "dim2",
+      title = sub("\\.tsv$", "", name),
+      subtitle = "Nearby points indicate more similar samples in this embedding"
+    ) +
+    kite_theme(base_size = 12) +
+    theme(
+      panel.background = element_rect(fill = pal$panel_bg, color = NA),
+      plot.background = element_rect(fill = pal$page_bg, color = NA)
+    )
 }}
 
 embedding_files <- Sys.glob(file.path(out_dir, "embedding_*.tsv"))
@@ -1786,7 +2585,7 @@ embedding_plots <- setNames(
 embedding_plots
 ```
 
-```{{r}}
+```{{r save_embedding_plots}}
 for (name in names(embedding_plots)) {{
   save_plot(embedding_plots[[name]], paste0(name, ".png"), width = 7, height = 5.5)
   save_plot(embedding_plots[[name]], paste0(name, ".pdf"), width = 7, height = 5.5)
@@ -1796,8 +2595,9 @@ for (name in names(embedding_plots)) {{
 # Heatmap
 
 The default heatmap uses `heatmap_clusters.tsv`, so it shows one representative row per k-mer cluster and renders quickly. Sample columns are clustered by default when `cluster_samples` is true, so the heatmap includes a sample dendrogram. K-mer rows are not hierarchically clustered; each row is a k-means cluster representative.
+This is the fastest high-level view of structured k-mer differences across samples. Each row is a representative standardized pattern, not a single raw count row. Red means relatively higher-than-row-average signal for that sample, and blue means relatively lower-than-row-average signal for that sample.
 
-```{{r}}
+```{{r cluster_heatmap}}
 sample_order <- read_kite_tsv("heatmap_samples.tsv")
 centroids <- read_kite_tsv("heatmap_clusters.tsv")
 samples <- intersect(sample_order$sample[order(sample_order$order)], colnames(centroids))
@@ -1811,7 +2611,7 @@ rownames(cluster_mat) <- paste0("cluster ", centroids$cluster, " (n=", centroids
 
 heatmap_col_fun <- circlize::colorRamp2(
   c(-2.5, 0, 2.5),
-  c("#2166AC", "white", "#B2182B")
+  c(pal$heatmap_low, pal$heatmap_mid, pal$heatmap_high)
 )
 
 ht_cluster <- ComplexHeatmap::Heatmap(
@@ -1831,7 +2631,7 @@ ht_cluster <- ComplexHeatmap::Heatmap(
 ComplexHeatmap::draw(ht_cluster, heatmap_legend_side = "right")
 ```
 
-```{{r}}
+```{{r save_cluster_heatmap}}
 save_heatmap(ht_cluster, "heatmap_cluster_representatives.png", width = 9, height = 6)
 ```
 
@@ -1839,13 +2639,13 @@ save_heatmap(ht_cluster, "heatmap_cluster_representatives.png", width = 9, heigh
 
 `kite analyze` writes `heatmap_matrix.tsv`, where each row is one exact k-mer and each value is the row-scaled signal used for heatmaps. This exact k-mer heatmap is disabled by default because it can be very large. To enable it, edit the YAML header at the top of this file and set:
 
-```{{text}}
+```{{text exact_heatmap_toggle}}
 render_exact_kmer_heatmap: true
 ```
 
 The exact heatmap uses the same sample column dendrogram as the default heatmap when `cluster_samples` is true. K-mer rows are not clustered because millions of row dendrogram leaves are not interpretable; rows are ordered by cluster and then by total absolute signal. Users can manually change `exact_heatmap_min_total_signal` and `exact_heatmap_max_kmers` in the YAML header to control how many rows are plotted and saved.
 
-```{{r}}
+```{{r exact_heatmap}}
 #| eval: !expr params$render_exact_kmer_heatmap
 min_total_signal <- params$exact_heatmap_min_total_signal
 max_kmers <- params$exact_heatmap_max_kmers
@@ -1885,7 +2685,7 @@ ht_exact <- ComplexHeatmap::Heatmap(
 ComplexHeatmap::draw(ht_exact, heatmap_legend_side = "right")
 ```
 
-```{{r}}
+```{{r save_exact_heatmap}}
 #| eval: !expr params$render_exact_kmer_heatmap
 save_heatmap(ht_exact, "heatmap_exact_filtered.png", width = 9, height = 8)
 ```
@@ -1893,17 +2693,18 @@ save_heatmap(ht_exact, "heatmap_exact_filtered.png", width = 9, height = 8)
 ## Heatmap cluster centroids
 
 The centroid table is much smaller than the full heatmap matrix and is useful when the input contains millions of k-mers.
+Each row below is the numeric centroid behind one representative heatmap row. `n` is the number of exact k-mer rows assigned to that cluster.
 
-```{{r}}
+```{{r centroid_table}}
 centroids <- read_kite_tsv("heatmap_clusters.tsv")
-centroids
+pretty_table(centroids, "Heatmap cluster centroids", digits = 3)
 ```
 
 # Export options
 
 Use `save_plot()` with different filenames to switch formats. Examples:
 
-```{{r}}
+```{{r export_examples}}
 # PNG, good default for quick reports
 save_plot(p_summary, "sample_summary.highres.png", width = 8, height = 5, dpi = 450)
 
@@ -1923,7 +2724,32 @@ The TSV workflow remains deterministic and independent from plotting. Rerender t
         embedding_list = embedding_list,
         heatmap_kmeans = heatmap_kmeans,
         cluster_samples = cluster_samples,
+        subtitle = subtitle,
     )
+}
+
+fn generated_by_subtitle() -> String {
+    let url = env!("CARGO_PKG_REPOSITORY");
+    let version = env!("CARGO_PKG_VERSION");
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown-user".to_string());
+    let host = hostname_string().unwrap_or_else(|| "unknown-host".to_string());
+    format!("Generated by kite ({url}) v{version} on {user}@{host}")
+}
+
+fn hostname_string() -> Option<String> {
+    let mut buf = [0u8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|byte| *byte == 0).unwrap_or(buf.len());
+    std::str::from_utf8(&buf[..len]).ok().map(str::to_string)
+}
+
+fn yaml_double_quoted(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -1951,6 +2777,13 @@ mod tests {
         assert_close(pearson_slice(&[1.0, 2.0, 3.0], &[2.0, 4.0, 6.0]), 1.0);
         assert_close(pearson_slice(&[1.0, 2.0, 3.0], &[6.0, 4.0, 2.0]), -1.0);
         assert_close(pearson_slice(&[1.0, 1.0, 1.0], &[2.0, 3.0, 4.0]), 0.0);
+    }
+
+    #[test]
+    fn kendall_tau_b_matches_expected_values() {
+        assert_close(kendall_tau_b(&[1.0, 2.0, 3.0], &[2.0, 4.0, 6.0]), 1.0);
+        assert_close(kendall_tau_b(&[1.0, 2.0, 3.0], &[6.0, 4.0, 2.0]), -1.0);
+        assert_close(kendall_tau_b(&[1.0, 1.0, 2.0], &[1.0, 2.0, 2.0]), 0.5);
     }
 
     #[test]
@@ -1985,6 +2818,7 @@ mod tests {
             vec![
                 "pearson",
                 "spearman",
+                "kendall",
                 "cosine",
                 "euclidean",
                 "manhattan",
@@ -2044,9 +2878,9 @@ mod tests {
     #[test]
     fn online_heatmap_assigns_and_updates_centroids() {
         let mut heatmap = OnlineHeatmap::new(2);
-        assert_eq!(heatmap.assign(&[1.0, 2.0, 3.0]), 1);
-        assert_eq!(heatmap.assign(&[3.0, 2.0, 1.0]), 2);
-        let cluster = heatmap.assign(&[1.1, 2.0, 2.9]);
+        assert_eq!(heatmap.assign_scaled(&[1.0, 2.0, 3.0]), 1);
+        assert_eq!(heatmap.assign_scaled(&[3.0, 2.0, 1.0]), 2);
+        let cluster = heatmap.assign_scaled(&[1.1, 2.0, 2.9]);
         assert_eq!(cluster, 1);
         assert_eq!(heatmap.counts, vec![2, 1]);
     }

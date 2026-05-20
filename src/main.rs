@@ -13,6 +13,7 @@ mod profile;
 mod query;
 mod runtime;
 mod stats;
+mod wind;
 
 use clap::Parser;
 use cli::{Cli, Commands};
@@ -34,6 +35,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Analyze(args) => analyze::run_analyze(args)?,
         Commands::Citation(args) => citation::run_citation(args)?,
         Commands::Fly(args) => fly::run_fly(args)?,
+        Commands::Wind(args) => wind::run_wind(args)?,
     }
     Ok(())
 }

@@ -30,12 +30,35 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
         args.buffer,
     );
     eprintln!(
-        "[kite fly] analysis: correlation={:?}, embedding={:?}, heatmap_kmeans={}, heatmap_seed={}, cluster_samples={}",
+        "[kite fly] analysis: correlation={:?}, embedding={:?}, embedding_input={:?}, embedding_input_dims={}, heatmap_kmeans={}, seed={}, cluster_samples={}",
         args.correlation,
         args.embedding,
+        args.embedding_input,
+        args.embedding_input_dims,
         args.heatmap_kmeans,
-        args.heatmap_seed,
+        args.seed,
         args.cluster_samples,
+    );
+    eprintln!(
+        "[kite fly] embedding params: tsne_perplexity={}, tsne_learning_rate={}, tsne_iterations={}, umap_neighbors={}, umap_min_dist={}, umap_spread={}, pacmap_neighbors={}, pacmap_mn_end={}, embedding_input={:?}, embedding_input_dims={}",
+        args.tsne_perplexity
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "auto".to_string()),
+        args.tsne_learning_rate,
+        args.tsne_iterations,
+        args.umap_neighbors
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "auto".to_string()),
+        args.umap_min_dist,
+        args.umap_spread,
+        args.pacmap_neighbors
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "auto".to_string()),
+        args.pacmap_mn_end
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "auto".to_string()),
+        args.embedding_input,
+        args.embedding_input_dims,
     );
     eprintln!("[kite fly] stage 0/{stage_total}: validating inputs and output directories");
     if let (Some(min), Some(max)) = (args.min, args.max) {
@@ -107,7 +130,10 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
     eprintln!(
         "[kite fly] stage 1/{stage_total}: complete in {:.3}s (sum of per-input times {:.3}s)",
         stage1_seconds,
-        count_records.iter().map(|record| record.seconds).sum::<f64>()
+        count_records
+            .iter()
+            .map(|record| record.seconds)
+            .sum::<f64>()
     );
     for record in &count_records {
         kite_inputs.push(record.output.to_string_lossy().to_string());
@@ -122,12 +148,21 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
         inputs: kite_inputs,
         output_dir: analysis_dir.to_string_lossy().to_string(),
         labels: Some(labels.clone()),
-        top_variable_kmers: args.top_variable_kmers,
         correlation: args.correlation,
         embedding: args.embedding,
+        embedding_input: args.embedding_input,
+        embedding_input_dims: args.embedding_input_dims,
         heatmap_kmeans: args.heatmap_kmeans,
-        heatmap_seed: args.heatmap_seed,
+        seed: args.seed,
         cluster_samples: args.cluster_samples,
+        tsne_perplexity: args.tsne_perplexity,
+        tsne_learning_rate: args.tsne_learning_rate,
+        tsne_iterations: args.tsne_iterations,
+        umap_neighbors: args.umap_neighbors,
+        umap_min_dist: args.umap_min_dist,
+        umap_spread: args.umap_spread,
+        pacmap_neighbors: args.pacmap_neighbors,
+        pacmap_mn_end: args.pacmap_mn_end,
         threads: args.threads,
         progress: args.progress,
         test_mode: false,
@@ -192,6 +227,15 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
                     format!("{:?}", args.correlation).to_lowercase(),
                 ),
                 ("embedding", format!("{:?}", args.embedding).to_lowercase()),
+                (
+                    "embedding_input",
+                    format!("{:?}", args.embedding_input).to_lowercase(),
+                ),
+                (
+                    "embedding_input_dims",
+                    args.embedding_input_dims.to_string(),
+                ),
+                ("seed", args.seed.to_string()),
                 ("output_dir", args.output_dir.clone()),
                 (
                     "workflow_report",
@@ -444,7 +488,10 @@ fn write_workflow_report(
     writeln!(
         out,
         "- Sum of per-input wall times: {:.3}s",
-        count_records.iter().map(|record| record.seconds).sum::<f64>()
+        count_records
+            .iter()
+            .map(|record| record.seconds)
+            .sum::<f64>()
     )?;
     writeln!(out)?;
     writeln!(
@@ -473,9 +520,43 @@ fn write_workflow_report(
     writeln!(out, "- Seconds: {:.3}", analyze_seconds)?;
     writeln!(out, "- Correlation: {:?}", args.correlation)?;
     writeln!(out, "- Embedding: {:?}", args.embedding)?;
+    writeln!(out, "- Embedding input: {:?}", args.embedding_input)?;
+    writeln!(out, "- Embedding input dims: {}", args.embedding_input_dims)?;
     writeln!(out, "- Heatmap clusters: {}", args.heatmap_kmeans)?;
-    writeln!(out, "- Heatmap seed: {}", args.heatmap_seed)?;
+    writeln!(out, "- Seed: {}", args.seed)?;
     writeln!(out, "- Cluster samples: {}", args.cluster_samples)?;
+    writeln!(
+        out,
+        "- t-SNE perplexity: {}",
+        args.tsne_perplexity
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "auto".to_string())
+    )?;
+    writeln!(out, "- t-SNE learning rate: {}", args.tsne_learning_rate)?;
+    writeln!(out, "- t-SNE iterations: {}", args.tsne_iterations)?;
+    writeln!(
+        out,
+        "- UMAP neighbors: {}",
+        args.umap_neighbors
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "auto".to_string())
+    )?;
+    writeln!(out, "- UMAP min_dist: {}", args.umap_min_dist)?;
+    writeln!(out, "- UMAP spread: {}", args.umap_spread)?;
+    writeln!(
+        out,
+        "- PaCMAP neighbors: {}",
+        args.pacmap_neighbors
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "auto".to_string())
+    )?;
+    writeln!(
+        out,
+        "- PaCMAP mn_end: {}",
+        args.pacmap_mn_end
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "auto".to_string())
+    )?;
     writeln!(out)?;
     writeln!(out, "## Stage 3: Outputs")?;
     writeln!(out)?;
