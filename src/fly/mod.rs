@@ -5,10 +5,11 @@ use std::time::Instant;
 
 use crate::analyze;
 use crate::cli::{AnalyzeArgs, FlyArgs};
-use crate::kiteops::{format_count_filter, infer_sample_labels};
+use crate::kiteops::{format_count_filter, infer_sample_labels_and_groups, print_command_line};
 use crate::stats::print_simple_test_report;
 
 pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
+    print_command_line("fly");
     let started = Instant::now();
     let stage_total = 3usize;
     eprintln!(
@@ -72,7 +73,11 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
     std::fs::create_dir_all(&db_dir)?;
     std::fs::create_dir_all(&analysis_dir)?;
 
-    let labels = infer_sample_labels(&args.inputs, args.labels.as_deref().unwrap_or(&[]))?;
+    let (labels, groups) = infer_sample_labels_and_groups(
+        &args.inputs,
+        args.labels.as_deref().unwrap_or(&[]),
+        args.groups.as_deref().unwrap_or(&[]),
+    )?;
     let workflow_report_path = Path::new(&args.output_dir).join("kite_flye_workflow_report.md");
     eprintln!(
         "[kite fly] labels={} ({})",
@@ -81,6 +86,15 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
             "user supplied"
         } else {
             "inferred from file names"
+        }
+    );
+    eprintln!(
+        "[kite fly] groups={} ({})",
+        groups.join(","),
+        if args.groups.is_some() {
+            "user supplied"
+        } else {
+            "inferred from sample labels"
         }
     );
     for (index, (input, label)) in args.inputs.iter().zip(labels.iter()).enumerate() {
@@ -148,6 +162,7 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
         inputs: kite_inputs,
         output_dir: analysis_dir.to_string_lossy().to_string(),
         labels: Some(labels.clone()),
+        groups: Some(groups.clone()),
         correlation: args.correlation,
         embedding: args.embedding,
         embedding_input: args.embedding_input,
@@ -187,6 +202,7 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
         &workflow_report_path,
         args,
         &labels,
+        &groups,
         &count_records,
         &count_plan,
         stage1_seconds,
@@ -212,6 +228,7 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
             &[
                 ("inputs", args.inputs.len().to_string()),
                 ("labels", labels.join(",")),
+                ("groups", groups.join(",")),
                 ("k", args.k.to_string()),
                 ("canonical", args.canonical.to_string()),
                 ("min", format_count_filter(args.min)),
@@ -438,6 +455,7 @@ fn write_workflow_report(
     path: &Path,
     args: &FlyArgs,
     labels: &[String],
+    groups: &[String],
     count_records: &[CountStageRecord],
     count_plan: &CountPlan,
     count_stage_seconds: f64,
@@ -471,6 +489,10 @@ fn write_workflow_report(
     writeln!(out, "## Labels")?;
     writeln!(out)?;
     writeln!(out, "{}", labels.join(", "))?;
+    writeln!(out)?;
+    writeln!(out, "## Groups")?;
+    writeln!(out)?;
+    writeln!(out, "{}", groups.join(", "))?;
     writeln!(out)?;
     writeln!(out, "## Stage 1: Count")?;
     writeln!(out)?;

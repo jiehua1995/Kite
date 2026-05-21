@@ -7,11 +7,12 @@ use crate::cli::ProfileArgs;
 use crate::kiteops::{
     apply_reader_filter_to_rows, create_output_writer, ensure_compatible_with_paths,
     for_each_union_row, format_reader_filter, infer_sample_labels, key_to_string,
-    load_partition_counts, open_readers, PartitionProgress,
+    load_partition_counts, open_readers, print_command_line, PartitionProgress,
 };
 use crate::stats::print_simple_test_report;
 
 pub fn run_profile(args: &ProfileArgs) -> anyhow::Result<()> {
+    print_command_line("profile");
     let started = Instant::now();
     let labels = infer_sample_labels(&args.inputs, args.labels.as_deref().unwrap_or(&[]))?;
     eprintln!(

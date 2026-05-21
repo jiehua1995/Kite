@@ -69,6 +69,33 @@ pub fn format_reader_filter(reader: &KiteReader) -> String {
     )
 }
 
+pub fn print_command_line(command: &str) {
+    let mut args = std::env::args_os();
+    let exe = args
+        .next()
+        .and_then(|value| Path::new(&value).file_name().map(|name| name.to_owned()))
+        .and_then(|name| name.into_string().ok())
+        .unwrap_or_else(|| "kite".to_string());
+    let rendered = std::iter::once(exe)
+        .chain(args.map(|arg| shell_quote(&arg.to_string_lossy())))
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!("[kite {}] Command: {}", command, rendered);
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '.' | '/' | '=' | ':' | ',' | '@'))
+    {
+        let escaped = value.replace('\'', "'\\''");
+        format!("'{}'", escaped)
+    } else {
+        value.to_string()
+    }
+}
+
 pub fn count_passes_reader_filter(reader: &KiteReader, count: u64) -> bool {
     count_passes_filter(count, reader.header.min_count, reader.header.max_count)
 }
@@ -135,6 +162,32 @@ pub fn infer_sample_labels(paths: &[String], labels: &[String]) -> anyhow::Resul
         derived.push(label);
     }
     Ok(derived)
+}
+
+pub fn infer_sample_groups(names: &[String], groups: &[String]) -> anyhow::Result<Vec<String>> {
+    if !groups.is_empty() && groups.len() != names.len() {
+        bail!(
+            "--group count ({}) must match input count ({}). groups=[{}], inputs=[{}]",
+            groups.len(),
+            names.len(),
+            groups.join(", "),
+            names.join(", ")
+        );
+    }
+    if !groups.is_empty() {
+        return Ok(groups.to_vec());
+    }
+    Ok(names.to_vec())
+}
+
+pub fn infer_sample_labels_and_groups(
+    paths: &[String],
+    labels: &[String],
+    groups: &[String],
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    let labels = infer_sample_labels(paths, labels)?;
+    let groups = infer_sample_groups(&labels, groups)?;
+    Ok((labels, groups))
 }
 
 pub fn open_readers(paths: &[String]) -> anyhow::Result<Vec<Arc<KiteReader>>> {
@@ -838,6 +891,42 @@ mod tests {
             merged,
             vec![(key(1), 9), (key(2), 5), (key(3), 10), (key(4), 8)]
         );
+    }
+
+    #[test]
+    fn infer_sample_labels_and_groups_defaults_to_labels() {
+        let paths = vec!["sample_a.kite".to_string(), "sample_b.kite".to_string()];
+        let (labels, groups) = infer_sample_labels_and_groups(&paths, &[], &[]).unwrap();
+        assert_eq!(labels, vec!["sample_a", "sample_b"]);
+        assert_eq!(groups, vec!["sample_a", "sample_b"]);
+    }
+
+    #[test]
+    fn infer_sample_labels_and_groups_uses_labels_when_groups_omitted() {
+        let paths = vec!["x.fastq.gz".to_string(), "y.fastq.gz".to_string()];
+        let labels = vec!["tumor".to_string(), "normal".to_string()];
+        let (resolved_labels, groups) =
+            infer_sample_labels_and_groups(&paths, &labels, &[]).unwrap();
+        assert_eq!(resolved_labels, labels);
+        assert_eq!(groups, vec!["tumor", "normal"]);
+    }
+
+    #[test]
+    fn infer_sample_labels_and_groups_uses_groups_when_provided() {
+        let paths = vec!["x.fastq.gz".to_string(), "y.fastq.gz".to_string()];
+        let labels = vec!["tumor".to_string(), "normal".to_string()];
+        let groups = vec!["case".to_string(), "control".to_string()];
+        let (resolved_labels, resolved_groups) =
+            infer_sample_labels_and_groups(&paths, &labels, &groups).unwrap();
+        assert_eq!(resolved_labels, labels);
+        assert_eq!(resolved_groups, groups);
+    }
+
+    #[test]
+    fn infer_sample_labels_and_groups_rejects_mismatched_groups() {
+        let paths = vec!["x.fastq.gz".to_string(), "y.fastq.gz".to_string()];
+        let groups = vec!["case".to_string()];
+        assert!(infer_sample_labels_and_groups(&paths, &[], &groups).is_err());
     }
 
     #[test]

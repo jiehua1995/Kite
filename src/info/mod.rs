@@ -8,10 +8,11 @@ use crate::cli::InfoArgs;
 use crate::dump::reader::KiteReader;
 use crate::format::header::update_count_filters_in_file;
 use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
-use crate::kiteops::format_count_filter;
+use crate::kiteops::{format_count_filter, print_command_line};
 use crate::stats::print_simple_test_report;
 
 pub fn run_info(args: &InfoArgs) -> anyhow::Result<()> {
+    print_command_line("info");
     let started = Instant::now();
     if args.set_min.is_some() && args.clear_min {
         anyhow::bail!("--set-min and --clear-min cannot be used together");

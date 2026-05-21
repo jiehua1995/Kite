@@ -524,6 +524,10 @@ pub struct AnalyzeArgs {
     #[arg(long = "label", num_args = 1.., action = ArgAction::Set, value_name = "LABEL", help_heading = "Behavior")]
     pub labels: Option<Vec<String>>,
 
+    /// Groups for the input files. Defaults to one group per sample using the sample labels.
+    #[arg(long = "group", num_args = 1.., action = ArgAction::Set, value_name = "GROUP", help_heading = "Behavior")]
+    pub groups: Option<Vec<String>>,
+
     /// Correlation mode for analysis.
     #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::Pearson, value_name = "MODE", help_heading = "Analysis")]
     pub correlation: CorrelationMode,
@@ -708,6 +712,10 @@ pub struct FlyArgs {
     /// Labels for the input files. Defaults to file names without common suffixes.
     #[arg(long = "label", num_args = 1.., action = ArgAction::Set, value_name = "LABEL", help_heading = "Behavior")]
     pub labels: Option<Vec<String>>,
+
+    /// Groups for the input files. Defaults to a single group when omitted.
+    #[arg(long = "group", num_args = 1.., action = ArgAction::Set, value_name = "GROUP", help_heading = "Behavior")]
+    pub groups: Option<Vec<String>>,
 
     /// Length of k-mers to count.
     #[arg(

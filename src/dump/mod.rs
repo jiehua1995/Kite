@@ -19,6 +19,7 @@ use crate::cli::DumpArgs;
 use crate::dump::merge::stream_partition_slabs;
 use crate::dump::reader::KiteReader;
 use crate::dump::writer::{queue_slots_for, SlabPool, DUMP_QUEUE_BYTES, DUMP_SLAB_BYTES};
+use crate::kiteops::print_command_line;
 use crate::stats::DumpStats;
 
 fn spawn_dump_progress(
@@ -116,6 +117,7 @@ fn fmt_duration_compact(duration: Duration) -> String {
 }
 
 pub fn run_dump(args: &DumpArgs) -> anyhow::Result<()> {
+    print_command_line("dump");
     let n_threads = if args.threads == 0 {
         num_cpus::get()
     } else {

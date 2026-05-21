@@ -13,8 +13,8 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 use crate::cli::{AnalyzeArgs, CorrelationMode, EmbeddingInputMode, EmbeddingMode};
 use crate::kiteops::{
     apply_reader_filter_to_rows, ensure_compatible_with_paths, fill_key_buffer, for_each_union_row,
-    format_reader_filter, infer_sample_labels, load_partition_counts, open_readers,
-    PartitionProgress,
+    format_reader_filter, infer_sample_labels_and_groups, load_partition_counts, open_readers,
+    print_command_line, PartitionProgress,
 };
 use crate::stats::print_simple_test_report;
 
@@ -497,11 +497,7 @@ fn kendall_tau_b(x: &[f64], y: &[f64]) -> f64 {
     if x.len() != y.len() || x.len() < 2 {
         return 0.0;
     }
-    let mut pairs = x
-        .iter()
-        .copied()
-        .zip(y.iter().copied())
-        .collect::<Vec<_>>();
+    let mut pairs = x.iter().copied().zip(y.iter().copied()).collect::<Vec<_>>();
     pairs.sort_by(|(x1, y1), (x2, y2)| x1.total_cmp(x2).then(y1.total_cmp(y2)));
 
     let n = pairs.len() as u128;
@@ -539,8 +535,8 @@ fn kendall_tau_b(x: &[f64], y: &[f64]) -> f64 {
     let mut scratch = vec![0.0; y_values.len()];
     let discordant = count_inversions(&mut y_values, &mut scratch);
 
-    let numerator =
-        total_pairs as i128 - ties_x as i128 - ties_y as i128 + ties_xy as i128 - 2 * discordant as i128;
+    let numerator = total_pairs as i128 - ties_x as i128 - ties_y as i128 + ties_xy as i128
+        - 2 * discordant as i128;
     let denom_x = total_pairs.saturating_sub(ties_x) as f64;
     let denom_y = total_pairs.saturating_sub(ties_y) as f64;
     let denominator = (denom_x * denom_y).sqrt();
@@ -555,7 +551,9 @@ fn write_kendall_tsv(columns: &[Vec<f64>], labels: &[String], path: &Path) -> an
     if columns.is_empty() {
         return write_square_matrix(labels, path, |_, _, _| 0.0);
     }
-    write_square_matrix(labels, path, |i, j, _| kendall_tau_b(&columns[i], &columns[j]))
+    write_square_matrix(labels, path, |i, j, _| {
+        kendall_tau_b(&columns[i], &columns[j])
+    })
 }
 
 fn pearson_slice(x: &[f64], y: &[f64]) -> f64 {
@@ -847,11 +845,16 @@ where
 }
 
 pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
+    print_command_line("analyze");
     let started = Instant::now();
     validate_analyze_args(args)?;
     std::fs::create_dir_all(&args.output_dir)?;
 
-    let labels = infer_sample_labels(&args.inputs, args.labels.as_deref().unwrap_or(&[]))?;
+    let (labels, groups) = infer_sample_labels_and_groups(
+        &args.inputs,
+        args.labels.as_deref().unwrap_or(&[]),
+        args.groups.as_deref().unwrap_or(&[]),
+    )?;
     eprintln!(
         "[kite analyze] inputs={}, output_dir={}",
         args.inputs.len(),
@@ -865,6 +868,15 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
             "user supplied"
         } else {
             "inferred from file names"
+        }
+    );
+    eprintln!(
+        "[kite analyze] groups={} ({})",
+        groups.join(","),
+        if args.groups.is_some() {
+            "user supplied"
+        } else {
+            "inferred from sample labels"
         }
     );
     for (index, ((path, label), reader)) in args
@@ -1033,8 +1045,7 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
             for (left, right) in sample_nonzero.iter_mut().zip(chunk.sample_nonzero.iter()) {
                 *left = left.saturating_add(*right);
             }
-            if let (Some(global), Some(local)) = (rank_columns.as_mut(), chunk.rank_columns)
-            {
+            if let (Some(global), Some(local)) = (rank_columns.as_mut(), chunk.rank_columns) {
                 for (dst, src) in global.iter_mut().zip(local.into_iter()) {
                     dst.extend(src);
                 }
@@ -1114,8 +1125,8 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
 
     let manifold_samples = labels.len();
     let requested_embedding_pca_dims = args.embedding_input_dims.max(1);
-    let effective_embedding_pca_dims = requested_embedding_pca_dims
-        .min(manifold_samples.saturating_sub(1).max(1));
+    let effective_embedding_pca_dims =
+        requested_embedding_pca_dims.min(manifold_samples.saturating_sub(1).max(1));
     let pca_basis_dims = match args.embedding_input {
         EmbeddingInputMode::Full => 2,
         EmbeddingInputMode::Pca => requested_embedding_pca_dims.max(2),
@@ -1215,7 +1226,7 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
             }
         };
         if let Some(scores) = maybe_scores {
-            write_embedding_table(&labels, &scores, *method, &path)?;
+            write_embedding_table(&labels, &groups, &scores, *method, &path)?;
             written_embedding_methods.push(*method);
         } else {
             skipped_embedding_methods.push(*method);
@@ -1237,6 +1248,7 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
         &quarto_path,
         render_quarto_document(
             &labels,
+            &groups,
             &correlation_methods,
             &embedding_methods,
             args.heatmap_kmeans,
@@ -1247,6 +1259,7 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
         &markdown_report_path,
         args,
         &labels,
+        &groups,
         &readers,
         rows_written,
         worker_threads,
@@ -1275,6 +1288,7 @@ pub fn run_analyze(args: &AnalyzeArgs) -> anyhow::Result<()> {
             &[
                 ("inputs", args.inputs.len().to_string()),
                 ("labels", labels.join(",")),
+                ("groups", groups.join(",")),
                 ("threads", args.threads.to_string()),
                 ("worker_threads", worker_threads.to_string()),
                 ("partitions", meta.partitions.to_string()),
@@ -1318,6 +1332,7 @@ fn write_analysis_markdown_report(
     path: &Path,
     args: &AnalyzeArgs,
     labels: &[String],
+    groups: &[String],
     readers: &[std::sync::Arc<crate::dump::reader::KiteReader>],
     rows_written: u64,
     worker_threads: usize,
@@ -1336,6 +1351,15 @@ fn write_analysis_markdown_report(
     writeln!(out, "| Field | Value |")?;
     writeln!(out, "|---|---:|")?;
     writeln!(out, "| Inputs | {} |", args.inputs.len())?;
+    writeln!(
+        out,
+        "| Groups | {} |",
+        if args.groups.is_some() {
+            groups.join(", ")
+        } else {
+            "default single group".to_string()
+        }
+    )?;
     writeln!(out, "| Matrix rows | {} |", rows_written)?;
     writeln!(out, "| Threads requested | {} |", args.threads)?;
     writeln!(out, "| Worker threads used | {} |", worker_threads)?;
@@ -1373,8 +1397,7 @@ fn write_analysis_markdown_report(
     writeln!(
         out,
         "- Embedding input: {:?} (requested dims: {}).",
-        args.embedding_input,
-        args.embedding_input_dims
+        args.embedding_input, args.embedding_input_dims
     )?;
     if !written_embedding_methods.is_empty() {
         writeln!(
@@ -1425,24 +1448,26 @@ fn write_analysis_markdown_report(
     writeln!(out)?;
     writeln!(
         out,
-        "| # | Label | Path | k | Canonical | Partitions | Key width | Rows | Chunks | Min | Max |"
+        "| # | Label | Group | Path | k | Canonical | Partitions | Key width | Rows | Chunks | Min | Max |"
     )?;
     writeln!(
         out,
-        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"
     )?;
-    for (index, ((input, label), reader)) in args
+    for (index, (((input, label), group), reader)) in args
         .inputs
         .iter()
         .zip(labels.iter())
+        .zip(groups.iter())
         .zip(readers.iter())
         .enumerate()
     {
         writeln!(
             out,
-            "| {} | {} | `{}` | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | `{}` | {} | {} | {} | {} | {} | {} | {} | {} |",
             index + 1,
             label,
+            group,
             input,
             reader.header.k,
             reader.header.canonical != 0,
@@ -1694,13 +1719,15 @@ fn embedding_to_scores(embedding: Vec<Vec<f64>>, samples: usize) -> anyhow::Resu
 
 fn write_embedding_table(
     labels: &[String],
+    groups: &[String],
     pca_scores: &[Vec<f64>],
     method: EmbeddingMethod,
     path: &Path,
 ) -> anyhow::Result<()> {
     let mut out = BufWriter::new(File::create(path)?);
-    writeln!(out, "sample\tmethod\tdim1\tdim2")?;
+    writeln!(out, "sample\tgroup\tmethod\tdim1\tdim2")?;
     for (idx, label) in labels.iter().enumerate() {
+        let group = groups.get(idx).map(String::as_str).unwrap_or("all");
         let x = pca_scores
             .get(idx)
             .and_then(|row| row.first())
@@ -1711,7 +1738,15 @@ fn write_embedding_table(
             .and_then(|row| row.get(1))
             .copied()
             .unwrap_or(0.0);
-        writeln!(out, "{}\t{}\t{:.8}\t{:.8}", label, method.slug(), x, y)?;
+        writeln!(
+            out,
+            "{}\t{}\t{}\t{:.8}\t{:.8}",
+            label,
+            group,
+            method.slug(),
+            x,
+            y
+        )?;
     }
     out.flush()?;
     Ok(())
@@ -1810,6 +1845,7 @@ fn build_analyze_partition_chunk(
 
 fn render_quarto_document(
     labels: &[String],
+    groups: &[String],
     correlation_methods: &[CorrelationMethod],
     embedding_methods: &[EmbeddingMethod],
     heatmap_kmeans: usize,
@@ -1819,6 +1855,11 @@ fn render_quarto_document(
     let label_list = labels
         .iter()
         .map(|label| format!("\"{}\"", label.replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let group_list = groups
+        .iter()
+        .map(|group| format!("\"{}\"", group.replace('"', "\\\"")))
         .collect::<Vec<_>>()
         .join(", ");
     let correlation_list = correlation_methods
@@ -1869,6 +1910,7 @@ execute:
 params:
   output_dir: "."
   samples: [{label_list}]
+  groups: [{group_list}]
   correlation_tables: "{correlation_list}"
   embedding_tables: "{embedding_list}"
   color_theme: "anime_sky"
@@ -2234,10 +2276,8 @@ pretty_table <- function(df, title = NULL, digits = 3) {{
       heading.background.color = "white",
       heading.border.bottom.color = "#000000",
       heading.title.font.weight = "bold",
-      heading.title.font.color = "#000000",
       column_labels.background.color = "white",
       column_labels.font.weight = "bold",
-      column_labels.font.color = "#000000",
       column_labels.border.bottom.color = "#000000",
       column_labels.border.bottom.style = "solid",
       data_row.padding = gt::px(5),
@@ -2320,6 +2360,13 @@ sample_overview <- sample_summary |>
   dplyr::rename(
     heatmap_order = order
   )
+sample_groups <- data.frame(
+  sample = params$samples,
+  group = params$groups,
+  stringsAsFactors = FALSE
+)
+sample_overview <- sample_overview |>
+  dplyr::left_join(sample_groups, by = "sample")
 
 pretty_table(sample_overview, "Sample overview", digits = 3)
 ```
@@ -2352,19 +2399,30 @@ pretty_table(
 These two bar plots answer the most basic QC question: do the samples have broadly similar total signal and broadly similar support size, or is one sample clearly deeper or sparser than the rest?
 
 ```{{r sample_summary_plots}}
-p_summary <- ggplot(sample_summary, aes(sample, total_raw_counts)) +
-  geom_col(fill = pal$bar_primary, width = 0.72) +
-  scale_y_continuous(labels = short_number) +
-  labs(x = NULL, y = "Total raw counts", title = "Total k-mer counts per sample") +
-  kite_theme(base_size = 12) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+group_levels <- unique(sample_overview$group)
+group_colors <- setNames(scales::hue_pal(l = 68, c = 100)(length(group_levels)), group_levels)
 
-p_nonzero <- ggplot(sample_summary, aes(sample, nonzero_kmers)) +
-  geom_col(fill = pal$bar_secondary, width = 0.72) +
+p_summary <- ggplot(sample_overview, aes(sample, total_raw_counts, fill = group)) +
+  geom_col(color = pal$ink, linewidth = 0.35, width = 0.72) +
   scale_y_continuous(labels = short_number) +
-  labs(x = NULL, y = "Nonzero k-mers", title = "Nonzero k-mers per sample") +
+  scale_fill_manual(values = group_colors, drop = FALSE) +
+  labs(x = NULL, y = "Total raw counts", title = "Total k-mer counts per sample", fill = "group") +
   kite_theme(base_size = 12) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = if (length(group_levels) > 1) "right" else "none"
+  )
+
+p_nonzero <- ggplot(sample_overview, aes(sample, nonzero_kmers, fill = group)) +
+  geom_col(color = pal$ink, linewidth = 0.35, width = 0.72) +
+  scale_y_continuous(labels = short_number) +
+  scale_fill_manual(values = group_colors, drop = FALSE) +
+  labs(x = NULL, y = "Nonzero k-mers", title = "Nonzero k-mers per sample", fill = "group") +
+  kite_theme(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = if (length(group_levels) > 1) "right" else "none"
+  )
 
 p_summary / p_nonzero
 ```
@@ -2385,6 +2443,7 @@ Read this section as a sample-to-sample relationship overview:
 - `euclidean`, `manhattan`, and `mahalanobis` are distance/score-style summaries
 
 For the similarity-style matrices, values closer to `1` indicate more similar samples, values near `0` indicate weak agreement, and negative values indicate opposing trends. For the distance-style matrices, smaller values indicate more similar samples.
+The plots below reorder samples by average-linkage clustering on the matrix values so neighboring rows and columns usually reflect stronger similarity.
 
 ```{{r correlation_plots}}
 base_matrix_plot <- function(
@@ -2435,14 +2494,41 @@ base_matrix_plot <- function(
     )
 }}
 
+matrix_sample_order <- function(values, distance_mode = FALSE) {{
+  if (nrow(values) < 2) {{
+    return(colnames(values))
+  }}
+  values <- (values + t(values)) / 2
+  diag(values) <- if (distance_mode) 0 else 1
+  dist_values <- if (distance_mode) {{
+    stats::as.dist(values)
+  }} else {{
+    stats::as.dist(pmax(0, 1 - values))
+  }}
+  ordering <- tryCatch(
+    stats::hclust(dist_values, method = "average")$order,
+    error = function(...) NULL
+  )
+  if (is.null(ordering)) {{
+    colnames(values)
+  }} else {{
+    colnames(values)[ordering]
+  }}
+}}
+
 plot_similarity_matrix <- function(
   name,
   label_digits = 2,
   label_size = 3
 ) {{
   df <- read_kite_tsv(name)
-
   labels <- colnames(df)[-1]
+  matrix_values <- as.matrix(df[, labels, drop = FALSE])
+  mode(matrix_values) <- "numeric"
+  rownames(matrix_values) <- df$sample
+  colnames(matrix_values) <- labels
+
+  ordered_labels <- matrix_sample_order(matrix_values, distance_mode = FALSE)
 
   long <- df |>
     tidyr::pivot_longer(
@@ -2451,8 +2537,8 @@ plot_similarity_matrix <- function(
       values_to = "value"
     ) |>
     dplyr::mutate(
-      sample_x = factor(sample_x, levels = labels),
-      sample_y = factor(sample, levels = rev(labels)),
+      sample_x = factor(sample_x, levels = ordered_labels),
+      sample_y = factor(sample, levels = rev(ordered_labels)),
       label = sprintf(paste0("%.", label_digits, "f"), value)
     )
 
@@ -2482,6 +2568,12 @@ plot_score_matrix <- function(
 ) {{
   df <- read_kite_tsv(name)
   labels <- colnames(df)[-1]
+  matrix_values <- as.matrix(df[, labels, drop = FALSE])
+  mode(matrix_values) <- "numeric"
+  rownames(matrix_values) <- df$sample
+  colnames(matrix_values) <- labels
+  ordered_labels <- matrix_sample_order(matrix_values, distance_mode = TRUE)
+
   long <- df |>
     tidyr::pivot_longer(
       cols = -sample,
@@ -2489,8 +2581,8 @@ plot_score_matrix <- function(
       values_to = "value"
     ) |>
     dplyr::mutate(
-      sample_x = factor(sample_x, levels = labels),
-      sample_y = factor(sample, levels = rev(labels)),
+      sample_x = factor(sample_x, levels = ordered_labels),
+      sample_y = factor(sample, levels = rev(ordered_labels)),
       label = sprintf(paste0("%.", label_digits, "f"), value)
     )
 
@@ -2530,11 +2622,19 @@ for (name in names(correlation_plots)) {{
 
 Requested embedding tables: `{embedding_list}`. Kite reads and plots whichever `embedding_*.tsv` files are available; methods skipped because of sample-count or feature-matrix limits simply do not produce a table.
 This section turns the sample-to-sample relationships into a 2D view. Points that fall close together are more similar under that embedding; points that separate strongly are more distinct. Different embedding methods emphasize different structure, so this section is best read comparatively rather than as a single absolute answer.
+If the embedding table includes a `group` column, points are filled by group so related samples are easier to scan at a glance.
 The label layer uses repel-based placement so sample names remain readable even when points are close together.
 
 ```{{r embedding_plots}}
 plot_embedding <- function(name, point_size = 3.2, label_size = 3.4) {{
   df <- read_kite_tsv(name)
+  df$group <- if ("group" %in% names(df)) {{
+    factor(df$group, levels = unique(df$group))
+  }} else {{
+    factor(rep("all", nrow(df)))
+  }}
+  group_colors <- setNames(scales::hue_pal(l = 68, c = 100)(nlevels(df$group)), levels(df$group))
+
   ggplot(df, aes(dim1, dim2, label = sample)) +
     geom_hline(yintercept = 0, color = pal$accent_soft, linewidth = 0.4) +
     geom_vline(xintercept = 0, color = pal$accent_soft, linewidth = 0.4) +
@@ -2545,12 +2645,13 @@ plot_embedding <- function(name, point_size = 3.2, label_size = 3.4) {{
     ) +
     geom_point(
       size = point_size,
-      color = pal$accent,
-      fill = pal$accent2,
+      aes(fill = group),
       shape = 21,
+      color = pal$ink,
       stroke = 0.7,
       alpha = 0.95
     ) +
+    scale_fill_manual(values = group_colors, drop = FALSE) +
     ggrepel::geom_label_repel(
       size = label_size,
       color = pal$ink,
@@ -2568,12 +2669,14 @@ plot_embedding <- function(name, point_size = 3.2, label_size = 3.4) {{
       x = "dim1",
       y = "dim2",
       title = sub("\\.tsv$", "", name),
-      subtitle = "Nearby points indicate more similar samples in this embedding"
+      subtitle = "Nearby points indicate more similar samples in this embedding",
+      fill = "group"
     ) +
     kite_theme(base_size = 12) +
     theme(
       panel.background = element_rect(fill = pal$panel_bg, color = NA),
-      plot.background = element_rect(fill = pal$page_bg, color = NA)
+      plot.background = element_rect(fill = pal$page_bg, color = NA),
+      legend.position = if (nlevels(df$group) > 1) "right" else "none"
     )
 }}
 
