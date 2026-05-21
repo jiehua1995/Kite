@@ -8,11 +8,12 @@ use crate::cli::QueryArgs;
 use crate::dump::reader::KiteReader;
 use crate::kiteops::{
     bucket_for_key, count_passes_reader_filter, encode_query_kmer, format_count_filter,
-    key_to_string, load_partition_counts, metadata_from_reader,
+    key_to_string, load_partition_counts, metadata_from_reader, print_command_line,
 };
 use crate::stats::print_simple_test_report;
 
 pub fn run_query(args: &QueryArgs) -> anyhow::Result<()> {
+    print_command_line("query");
     let started = Instant::now();
     eprintln!("[kite query] opening: {}", args.input);
     eprintln!("[kite query] query:   {}", args.kmer);

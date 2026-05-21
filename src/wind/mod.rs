@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::WindArgs;
+use crate::kiteops::print_command_line;
 
 const KITE_EMOJI: &str = "\u{1FA81}";
 
@@ -46,6 +47,7 @@ const ENCOURAGEMENTS: &[&str] = &[
 ];
 
 pub fn run_wind(_args: &WindArgs) -> anyhow::Result<()> {
+    print_command_line("wind");
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as usize)

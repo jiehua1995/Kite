@@ -31,6 +31,7 @@ use crate::count::worker::CountWorker;
 use crate::count::writer::ConcurrentKiteWriter;
 use crate::format::header::{KEY_WIDTH_U128, KEY_WIDTH_U256, KEY_WIDTH_U64};
 use crate::format::{CODEC_DVLE, CODEC_RAW, CODEC_ZSTD};
+use crate::kiteops::print_command_line;
 use crate::runtime::{apply_process_memory_limit, resolve_memory_limit_bytes};
 use crate::stats::CountStats;
 
@@ -203,6 +204,7 @@ fn fmt_duration_compact(duration: Duration) -> String {
 }
 
 pub fn run_count(args: &CountArgs) -> anyhow::Result<()> {
+    print_command_line("count");
     if args.k < 1 || args.k > 128 {
         anyhow::bail!("k must be between 1 and 128 (got {})", args.k);
     }

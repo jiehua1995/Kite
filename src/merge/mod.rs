@@ -11,8 +11,8 @@ use crate::count::writer::ConcurrentKiteWriter;
 use crate::format::{CODEC_DVLE, CODEC_RAW};
 use crate::kiteops::{
     apply_reader_filter_to_rows, ensure_compatible_with_paths, format_count_filter,
-    load_partition_counts, merge_vectors_total, open_readers, serialize_partition_chunk,
-    PartitionProgress,
+    load_partition_counts, merge_vectors_total, open_readers, print_command_line,
+    serialize_partition_chunk, PartitionProgress,
 };
 use crate::stats::print_simple_test_report;
 
@@ -20,6 +20,7 @@ const MIB: usize = 1024 * 1024;
 const DEFAULT_STAGING_MB: usize = 16;
 
 pub fn run_merge(args: &MergeArgs) -> anyhow::Result<()> {
+    print_command_line("merge");
     let started = Instant::now();
     eprintln!(
         "[kite merge] inputs={}, output={}",

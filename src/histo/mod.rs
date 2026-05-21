@@ -8,11 +8,13 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 use crate::cli::HistoArgs;
 use crate::kiteops::{
     apply_reader_filter_to_rows, create_output_writer, format_reader_filter, infer_sample_labels,
-    load_partition_counts, metadata_from_reader, open_readers, PartitionProgress,
+    load_partition_counts, metadata_from_reader, open_readers, print_command_line,
+    PartitionProgress,
 };
 use crate::stats::print_simple_test_report;
 
 pub fn run_histo(args: &HistoArgs) -> anyhow::Result<()> {
+    print_command_line("histo");
     let started = Instant::now();
     let labels = infer_sample_labels(&args.inputs, args.labels.as_deref().unwrap_or(&[]))?;
     eprintln!(

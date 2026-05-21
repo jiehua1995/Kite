@@ -3,8 +3,14 @@
 <p>
 	<img src="doc/logo.png" alt="logo" width="100" align="left">
 </p> 
-
 **Kite** is a high-performance Rust toolkit for exact k-mer counting, reusable `.kite` indexes, inspection, and downstream multi-sample analysis.
+
+## Dependencies
+
+- [Rust](https://rust-lang.org/learn/get-started/) toolchain for building Kite
+- [Quarto](https://quarto.org/) for rendering `analysis_report.qmd`
+- `quarto install tinytex` if you want Quarto to render PDF output
+
 
 ## Command Overview
 
@@ -245,6 +251,7 @@ Compatibility requirements:
 |---|---|---|---|
 | `-i, --input` | required | One or more `.kite` files | Use one `-i` followed by all files; builds an exact multi-sample matrix |
 | `--label` | inferred from filenames | Sample labels | Must match the number of inputs |
+| `--group` | one per sample | Sample groups for report coloring | Defaults to the sample labels; must match the number of inputs when provided |
 | `-o, --output-dir` | required | Output directory | TSV tables, `analysis_report.md`, and `analysis_report.qmd` are written here |
 | `--correlation` | `pearson` | Correlation or distance mode | `all`, `pearson`, `spearman`, `kendall`, `cosine`, `euclidean`, `manhattan`, or `mahalanobis` |
 | `--embedding` | `pca` | Embedding mode | `all`, `pca`, `tsne`, `umap`, or `pacmap` (`pcamap` is accepted as an alias) |
@@ -313,6 +320,8 @@ R-side notes:
 - Install [Quarto](https://quarto.org/) before rendering `analysis_report.qmd`; run `quarto install tinytex` when you need PDF output.
 - The generated `analysis_report.qmd` declares and installs the R packages it needs when rendered, then reads and summarizes the TSV inventory and sample summary before plotting.
 - The generated `analysis_report.qmd` includes a YAML `color_theme` parameter. Built-in choices are `anime_sky`, `sakura_mint`, `sunset_pop`, and `midnight_tokyo`; switching themes only changes styled tables and figure colors.
+- When `embedding_*.tsv` includes a `group` column, the Quarto embedding plots fill points by group.
+- When `--group` is omitted, Kite uses one group per sample and names each group after the sample label.
 - The default report saves separate PNG and PDF files for sample summaries, correlation/distance heatmaps, embeddings, and the cluster-representative heatmap with fixed figure sizes.
 - The default heatmap uses `heatmap_clusters.tsv`, shows one representative row per k-mer cluster, and includes a sample-column dendrogram when `--cluster-samples true`.
 - `heatmap_matrix.tsv` still contains one row per exact k-mer. To plot that larger exact heatmap, edit the QMD YAML and set `render_exact_kmer_heatmap: true`; exact k-mer rows are ordered but not hierarchically clustered.
@@ -331,6 +340,7 @@ R-side notes:
 |---|---|---|---|
 | `-i, --input` | required | One or more FASTQ inputs | Use one `-i` followed by all files; one `.kite` database is produced per input |
 | `--label` | inferred from filenames | Sample labels | Must match the number of inputs |
+| `--group` | one per sample | Sample groups for report coloring | Defaults to the sample labels; must match the number of inputs when provided |
 | `-o, --output-dir` | required | Output directory | Creates `databases/` and `analysis/` |
 | `-k, --kmer` | `31` | k-mer length used by count | |
 | `--canonical` | `false` | Whether to canonicalize k-mers in internal count jobs | Accepts `true` or `false` |

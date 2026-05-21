@@ -2,10 +2,11 @@ use std::io::Write;
 use std::time::Instant;
 
 use crate::cli::{CitationArgs, CitationFormat};
-use crate::kiteops::create_output_writer;
+use crate::kiteops::{create_output_writer, print_command_line};
 use crate::stats::print_simple_test_report;
 
 pub fn run_citation(args: &CitationArgs) -> anyhow::Result<()> {
+    print_command_line("citation");
     let started = Instant::now();
     eprintln!(
         "[kite citation] format={:?}, output={}",
@@ -16,10 +17,7 @@ pub fn run_citation(args: &CitationArgs) -> anyhow::Result<()> {
         CitationFormat::Text => {
             writeln!(out, "kite {}", env!("CARGO_PKG_VERSION"))?;
             writeln!(out, "Title: Kite")?;
-            writeln!(
-                out,
-                "Description: k-mer index and throughput engine"
-            )?;
+            writeln!(out, "Description: k-mer index and throughput engine")?;
             writeln!(
                 out,
                 "Recommended citation: Kite software, version {}",
@@ -37,10 +35,7 @@ pub fn run_citation(args: &CitationArgs) -> anyhow::Result<()> {
                 env!("CARGO_PKG_VERSION").replace('.', "_")
             )?;
             writeln!(out, "  title = {{Kite}},")?;
-            writeln!(
-                out,
-                "  note = {{k-mer index and throughput engine}},"
-            )?;
+            writeln!(out, "  note = {{k-mer index and throughput engine}},")?;
             writeln!(out, "  year = {{2026}},")?;
             writeln!(
                 out,
