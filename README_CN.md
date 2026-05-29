@@ -51,7 +51,6 @@ target/release/kite
   -o sample.kite \
   -t 48 \
   --memory 64G \
-  --buffer 32 \
   --min 2 \
   --max 1000000 \
   -p
@@ -64,6 +63,7 @@ target/release/kite
   -i sample.kite \
   -o sample.tsv \
   -t 48 \
+  --buffer 64 \
   -p
 ```
 
@@ -139,7 +139,6 @@ target/release/kite
   --memory 64G \
   --min 2 \
   --max 1000000 \
-  --buffer 32 \
   --correlation all \
   --embedding all \
   --embedding-input pca \
@@ -158,16 +157,18 @@ target/release/kite
 | `-i, --input` | 必填 | 输入 `FASTQ`、`FASTQ.GZ` 或 `BGZF FASTQ` | 当前一次处理一个输入文件 |
 | `-o, --output` | 必填 | 输出 `.kite` 路径 | 建议以 `.kite` 结尾 |
 | `-t, --threads` | `0` | 总线程预算 | `0` 表示自动 |
-| `--partitions` | `0` | 分区数量 | `0` 表示自动规划；手动指定时必须是 2 的幂 |
-| `--chunk-kmers` | `8000000` | reader 侧目标批大小 | 会影响 flush 频率和内存行为 |
-| `--memory` | 自动探测 | 总内存预算 | 必须写成 `512M`、`64G`、`1T` |
+| `--partitions` | `0` | 分区数量 | `0` 表示自动规划；规划器会结合输入规模、内存和线程预算；手动指定时必须是 2 的幂 |
+| `--chunk-kmers` | `0` | reader 侧目标批大小 | `0` 表示自动；规划器会根据内存和 worker 数选择 chunk 大小 |
+| `--memory` | 自动探测 | 总内存预算 | 必须写成 `512M`、`64G`、`1T`；Unix 下也会作为进程地址空间硬限制 |
 | `--canonical` | `false` | 是否 canonicalize k-mer | 接受 `true` 或 `false`；会改变结果语义 |
 | `--min` | 无 | header 中的最小 count 标记 | 原始计数仍然保留；后续命令会隐藏低于该值的 k-mer |
 | `--max` | 无 | header 中的最大 count 标记 | 原始计数仍然保留；后续命令会隐藏高于该值的 k-mer |
 | `--mode` | `fast` | 输出压缩模式 | `fast` 只写 DVLE/raw；`balanced` 和 `compact` 会在更小时额外尝试 zstd |
-| `--buffer` | `32` | staging 缓冲目标大小，单位 MB | 独立于 `--mode`；更大通常 flush 更少，但内存占用更高；内存不够时规划器会自动降到更小 buffer |
+| `--buffer` | 自动 | staging 缓冲目标大小，单位 MB | 省略时自动规划；显式指定时作为请求上限，内存紧张时仍可能下调 |
 | `-p, --progress` | `false` | 显示进度 | 长任务建议开启 |
 | `--test-mode` | `false` | 打印详细运行统计 | 适合 benchmark 和调参 |
+
+当 `--partitions`、`--chunk-kmers` 和 `--buffer` 保持自动模式时，`kite count` 会根据输入采样、`-t/--threads` 和 `--memory` 生成内部执行计划。在固定内存的 benchmark 场景下，规划器可能会自动降低 count worker 数、限制 partitions、缩小 chunk，并降低 staging buffer，以避免超过进程内存限制。`--test-mode` 会打印实际采用的 worker、partitions、chunk 大小、staging buffer、tracked budget 和 reserve。
 
 `--min` 和 `--max` 是延迟过滤标记。它们会写入 `.kite` header，但 `count` 不会为了过滤而重写数据库。`dump`、`histo`、`profile`、`analyze` 和 `merge` 会读取这些标记，并在输出或分析时排除不合格的 k-mer。`query` 仍然显示原始存储 count，并额外提示该 k-mer 是否会被当前 header 标记排除。`info` 可以原地修改这些标记，不触碰已存储的 count 数据。
 
@@ -178,10 +179,28 @@ target/release/kite
 | `-i, --input` | 必填 | 输入 `.kite` 文件 | 每次只处理一个数据库 |
 | `-o, --output` | 必填 | 输出 TSV 路径 | 传 `-` 可输出到 stdout |
 | `-t, --threads` | `0` | dump worker 线程数 | `0` 表示自动 |
+| `--buffer` | `64` | 输出 slab / writer buffer 大小，单位 MB | 数值越大，单次缓冲越大，但写回压力和在途数据也会增加 |
 | `-p, --progress` | `false` | 显示进度 | 大文件建议开启 |
 | `--test-mode` | `false` | 打印详细运行统计 | 用于验证和 benchmark |
 
 `dump` 在写 TSV 时会应用输入文件 header 里的 `Min Count` 和 `Max Count` 标记。可以用 `kite info --set-min/--set-max` 修改标记，而不需要重新 count。
+如果输出路径的父目录不存在，`dump` 会自动创建。对于文件输出，Kite 使用单个顺序 writer 线程配合大 slab 流式写盘；真正的解码、merge 和 TSV 格式化都已经在 worker 线程里完成，writer 本身只负责 `write_all` 和 `flush`。
+
+对于文件输出，`dump` 会在启动时根据估算输出大小一次性选择固定的在途队列预算：
+
+- 小输出：`4` 个 slab
+- 中等输出：`3` 个 slab
+- 大输出：`2` 个 slab
+
+运行过程中不会再自适应调整。这样做的目的是保持背压逻辑简单，并在超大 TSV 导出时尽量避免把 page cache 一次性顶满。
+
+`--test-mode` 会打印 `writer_io`、`writer_queue_wait`、`peak_inflight_bytes`、`peak_inflight_slabs`、`writer_write_calls`、`avg_write_call_mb` 和 `final_budget_bytes`。这些指标是判断 dump 是否受 I/O 限制的关键。
+
+如果你想 benchmark dump 的格式化上限，而不把真实 TSV 落盘，可以直接输出到 stdout：
+
+```bash
+./target/release/kite dump -i sample.kite -o - -t 64 | wc -c
+```
 
 ### `kite info`
 
@@ -351,8 +370,8 @@ R 端说明：
 | `-t, --threads` | `0` | 传给 `count` 的线程预算 | `0` 表示自动 |
 | `--memory` | 自动探测 | 传给 `count` 的内存预算 | 必须使用 `M`、`G` 或 `T` 后缀 |
 | `--partitions` | `0` | count 分区数量 | `0` 表示自动规划 |
-| `--chunk-kmers` | `8000000` | count chunk 大小 | 和 `kite count` 语义一致 |
-| `--buffer` | `32` | count staging buffer，单位 MB | 和 `kite count` 语义一致 |
+| `--chunk-kmers` | `0` | count chunk 大小 | 和 `kite count` 的自动语义一致 |
+| `--buffer` | 自动 | count staging buffer，单位 MB | 和 `kite count` 的自动语义一致 |
 | `--correlation` | `pearson` | 传给 `analyze` 的相关性或距离模式 | |
 | `--embedding` | `pca` | 传给 `analyze` 的降维模式 | |
 | `--embedding-input` | `pca` | 传给 `analyze` 的降维输入模式 | `full` 会保留原始完整 k-mer 特征矩阵 |

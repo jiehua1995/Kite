@@ -50,7 +50,6 @@ Count 31-mers:
   -o sample.kite \
   -t 48 \
   --memory 64G \
-  --buffer 32 \
   --min 2 \
   --max 1000000 \
   -p
@@ -63,6 +62,7 @@ Dump exact counts:
   -i sample.kite \
   -o sample.tsv \
   -t 48 \
+  --buffer 64 \
   -p
 ```
 
@@ -138,7 +138,6 @@ Run the full one-shot workflow:
   --memory 64G \
   --min 2 \
   --max 1000000 \
-  --buffer 32 \
   --correlation all \
   --embedding all \
   --embedding-input pca \
@@ -157,16 +156,18 @@ Run the full one-shot workflow:
 | `-i, --input` | required | Input `FASTQ`, `FASTQ.GZ`, or `BGZF FASTQ` | One input file per run |
 | `-o, --output` | required | Output `.kite` path | Should end with `.kite` |
 | `-t, --threads` | `0` | Total thread budget | `0` means auto |
-| `--partitions` | `0` | Number of partitions | `0` means auto; manual values must be powers of two |
-| `--chunk-kmers` | `8000000` | Reader-side target batch size | Affects flushing and memory behavior |
-| `--memory` | auto-detected | Total memory budget | Must be written as `512M`, `64G`, or `1T` |
+| `--partitions` | `0` | Number of partitions | `0` means auto; the planner accounts for input size, memory, and thread budget; manual values must be powers of two |
+| `--chunk-kmers` | `0` | Reader-side target batch size | `0` means auto; the planner chooses a chunk size from memory and worker count |
+| `--memory` | auto-detected | Total memory budget | Must be written as `512M`, `64G`, or `1T`; on Unix this is also applied as the process address-space limit |
 | `--canonical` | `false` | Whether to canonicalize k-mers | Accepts `true` or `false`; changes result semantics |
 | `--min` | none | Header minimum count marker | Raw counts are retained; downstream commands hide counts below this marker |
 | `--max` | none | Header maximum count marker | Raw counts are retained; downstream commands hide counts above this marker |
 | `--mode` | `fast` | Output compression mode | `fast` writes DVLE/raw only; `balanced` and `compact` additionally try zstd when smaller |
-| `--buffer` | `32` | Target staging buffer size in MB | Independent of `--mode`; larger values may reduce flushes but use more memory; planner falls back to smaller buffers when memory is tight |
+| `--buffer` | auto | Target staging buffer size in MB | Omit for auto; explicit values are treated as the requested upper bound and may be reduced when memory is tight |
 | `-p, --progress` | `false` | Show progress | Useful for long jobs |
 | `--test-mode` | `false` | Print detailed runtime statistics | Useful for benchmarking and tuning |
+
+When `--partitions`, `--chunk-kmers`, and `--buffer` are left in auto mode, `kite count` derives an internal plan from the input sample, `-t/--threads`, and `--memory`. Under tight fixed-memory benchmarks, the planner may reduce count worker threads, cap partitions, shrink chunks, and lower staging buffers to stay within the process limit. `--test-mode` prints the selected plan, including actual count workers, partitions, chunk size, staging buffer, tracked budget, and reserve.
 
 `--min` and `--max` are lazy filters. They are written into the `.kite` header and do not slow down `count` by rewriting the database. `dump`, `histo`, `profile`, `analyze`, and `merge` read these markers and exclude marked-out k-mers from their outputs. `query` still reports the raw stored count and tells you whether that k-mer is excluded by the current header markers. `info` can edit the markers in place without touching the stored count data.
 
@@ -177,10 +178,28 @@ Run the full one-shot workflow:
 | `-i, --input` | required | Input `.kite` file | One database per run |
 | `-o, --output` | required | Output TSV path | Use `-` for stdout |
 | `-t, --threads` | `0` | Dump worker thread count | `0` means auto |
+| `--buffer` | `64` | Output slab / writer buffer size in MB | Larger values increase per-slab buffering and in-flight writeback pressure |
 | `-p, --progress` | `false` | Show progress | Useful for large files |
 | `--test-mode` | `false` | Print detailed runtime statistics | Useful for validation and benchmarking |
 
 `dump` applies the input file's header `Min Count` and `Max Count` markers while writing TSV. Use `kite info --set-min/--set-max` to change those markers without recounting.
+If the parent output directory does not exist, `dump` creates it automatically. For file output, Kite uses a single sequential writer thread backed by large slabs; workers already decode, merge, and format complete TSV slabs before sending them. The writer only performs `write_all` and `flush`.
+
+For file output, `dump` also chooses a fixed in-flight queue budget once at startup from the estimated output size:
+
+- small outputs: `4` slabs
+- medium outputs: `3` slabs
+- large outputs: `2` slabs
+
+This queue choice is not adjusted during the run. The goal is to keep backpressure simple and avoid overfilling page cache on very large TSV exports.
+
+`--test-mode` reports `writer_io`, `writer_queue_wait`, `peak_inflight_bytes`, `peak_inflight_slabs`, `writer_write_calls`, `avg_write_call_mb`, and `final_budget_bytes`. These are the main indicators for diagnosing I/O-bound dumps.
+
+For benchmarking dump formatting without real TSV disk writes, you can stream to stdout:
+
+```bash
+./target/release/kite dump -i sample.kite -o - -t 64 | wc -c
+```
 
 ### `kite info`
 
@@ -350,8 +369,8 @@ R-side notes:
 | `-t, --threads` | `0` | Thread budget forwarded to count | `0` means auto |
 | `--memory` | auto-detected | Memory budget forwarded to count | Must use `M`, `G`, or `T` suffixes |
 | `--partitions` | `0` | Count partition count | `0` means auto |
-| `--chunk-kmers` | `8000000` | Count chunk size | Same semantics as `kite count` |
-| `--buffer` | `32` | Count staging buffer in MB | Same semantics as `kite count` |
+| `--chunk-kmers` | `0` | Count chunk size | Same auto semantics as `kite count` |
+| `--buffer` | auto | Count staging buffer in MB | Same auto semantics as `kite count` |
 | `--correlation` | `pearson` | Correlation or distance mode passed to analyze | |
 | `--embedding` | `pca` | Embedding mode passed to analyze | |
 | `--embedding-input` | `pca` | Embedding input mode passed to analyze | `full` keeps the original full k-mer feature matrix |

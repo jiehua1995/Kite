@@ -198,10 +198,10 @@ pub struct CountArgs {
     )]
     pub partitions: usize,
 
-    /// Number of k-mers per chunk.
+    /// Number of k-mers per chunk. Use 0 to auto-select.
     #[arg(
         long = "chunk-kmers",
-        default_value_t = 8_000_000,
+        default_value_t = 0,
         value_name = "N",
         help_heading = "Performance"
     )]
@@ -211,14 +211,9 @@ pub struct CountArgs {
     #[arg(long = "memory", value_name = "SIZE", help_heading = "Performance")]
     pub memory: Option<String>,
 
-    /// Staging buffer target in MB. Independent of --mode.
-    #[arg(
-        long = "buffer",
-        default_value_t = 32,
-        value_name = "MB",
-        help_heading = "Performance"
-    )]
-    pub buffer: usize,
+    /// Staging buffer target in MB. If omitted, count auto-selects from the memory budget.
+    #[arg(long = "buffer", value_name = "MB", help_heading = "Performance")]
+    pub buffer: Option<usize>,
 
     /// Show progress.
     #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
@@ -236,7 +231,7 @@ pub struct CountArgs {
 /// Dump k-mer counts from a .kite file into a table.
 #[derive(Args, Debug)]
 #[command(
-    after_help = "Examples:\n  kite dump -i reads.kite -o reads.tsv",
+    after_help = "Examples:\n  kite dump -i reads.kite -o reads.tsv\n  kite dump -i reads.kite -o reads.tsv -t 64 --buffer 64",
     help_template = "{about}\n\nUsage: {usage}\n\n{all-args}\n{after-help}",
     disable_help_flag = true
 )]
@@ -268,6 +263,10 @@ pub struct DumpArgs {
         help_heading = "Performance"
     )]
     pub threads: usize,
+
+    /// Output slab / writer buffer target in MB. If omitted, dump uses the built-in default.
+    #[arg(long = "buffer", value_name = "MB", help_heading = "Performance")]
+    pub buffer: Option<usize>,
 
     /// Show progress.
     #[arg(short = 'p', long = "progress", help_heading = "Behavior")]
@@ -766,23 +765,18 @@ pub struct FlyArgs {
     )]
     pub partitions: usize,
 
-    /// Number of k-mers per count chunk.
+    /// Number of k-mers per count chunk. Use 0 to auto-select.
     #[arg(
         long = "chunk-kmers",
-        default_value_t = 8_000_000,
+        default_value_t = 0,
         value_name = "N",
         help_heading = "Performance"
     )]
     pub chunk_kmers: usize,
 
-    /// Staging buffer target in MB for the count stage.
-    #[arg(
-        long = "buffer",
-        default_value_t = 32,
-        value_name = "MB",
-        help_heading = "Performance"
-    )]
-    pub buffer: usize,
+    /// Staging buffer target in MB for the count stage. If omitted, count auto-selects from the memory budget.
+    #[arg(long = "buffer", value_name = "MB", help_heading = "Performance")]
+    pub buffer: Option<usize>,
 
     /// Correlation mode for analysis.
     #[arg(long = "correlation", value_enum, default_value_t = CorrelationMode::Pearson, value_name = "MODE", help_heading = "Analysis")]

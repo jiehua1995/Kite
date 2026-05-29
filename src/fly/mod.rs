@@ -18,7 +18,7 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
         args.output_dir,
     );
     eprintln!(
-        "[kite fly] settings: k={}, canonical={}, min={}, max={}, mode={:?}, threads={}, memory={}, partitions={}, chunk_kmers={}, buffer={}MB",
+        "[kite fly] settings: k={}, canonical={}, min={}, max={}, mode={:?}, threads={}, memory={}, partitions={}, chunk_kmers={}, buffer={}",
         args.k,
         args.canonical,
         format_count_filter(args.min),
@@ -28,7 +28,9 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
         args.memory.as_deref().unwrap_or("auto"),
         args.partitions,
         args.chunk_kmers,
-        args.buffer,
+        args.buffer
+            .map(|value| format!("{}MB", value))
+            .unwrap_or_else(|| "auto".to_string()),
     );
     eprintln!(
         "[kite fly] analysis: correlation={:?}, embedding={:?}, embedding_input={:?}, embedding_input_dims={}, heatmap_kmeans={}, seed={}, cluster_samples={}",
@@ -236,8 +238,20 @@ pub fn run_fly(args: &FlyArgs) -> anyhow::Result<()> {
                 ("count_mode", format!("{:?}", args.mode).to_lowercase()),
                 ("threads", args.threads.to_string()),
                 ("partitions", args.partitions.to_string()),
-                ("chunk_kmers", args.chunk_kmers.to_string()),
-                ("buffer_mb", args.buffer.to_string()),
+                (
+                    "chunk_kmers",
+                    if args.chunk_kmers == 0 {
+                        "auto".to_string()
+                    } else {
+                        args.chunk_kmers.to_string()
+                    },
+                ),
+                (
+                    "buffer_mb",
+                    args.buffer
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "auto".to_string()),
+                ),
                 ("keep_intermediate", args.keep_intermediate.to_string()),
                 (
                     "correlation",
@@ -306,7 +320,7 @@ struct CountTaskConfig {
     mode: String,
     partitions: usize,
     chunk_kmers: usize,
-    buffer: usize,
+    buffer: Option<usize>,
     progress: bool,
 }
 
@@ -405,9 +419,10 @@ fn run_count_task(
         .arg("--partitions")
         .arg(config.partitions.to_string())
         .arg("--chunk-kmers")
-        .arg(config.chunk_kmers.to_string())
-        .arg("--buffer")
-        .arg(config.buffer.to_string());
+        .arg(config.chunk_kmers.to_string());
+    if let Some(buffer) = config.buffer {
+        command.arg("--buffer").arg(buffer.to_string());
+    }
     if let Some(memory) = memory {
         command.arg("--memory").arg(memory);
     }
