@@ -1,6 +1,6 @@
 [package]
 name = "kite"
-version = "0.7.4"
+version = "0.7.5"
 edition = "2021"
 description = "K-mer indexing and throughput engine"
 authors = ["Jie Hua <Jie.Hua@lmu.de>"]

@@ -219,7 +219,7 @@ fn ensure_compatible_with_names(
     paths: Option<&[String]>,
 ) -> anyhow::Result<CompatibleMetadata> {
     let Some(first) = readers.first() else {
-        bail!("no input .kite files provided");
+        bail!("no input .kite files were provided.\nPass one or more .kite files with -i/--input.");
     };
     let meta = CompatibleMetadata {
         k: first.header.k,
@@ -232,38 +232,38 @@ fn ensure_compatible_with_names(
         let first_name = input_name(0, paths);
         if reader.header.k != meta.k {
             bail!(
-                "{} has k={}, expected k={} from {}",
+                "incompatible .kite inputs: {} has k={}, but {} has k={}.\nAll input .kite files must use the same k.",
                 name,
                 reader.header.k,
-                meta.k,
-                first_name
+                first_name,
+                meta.k
             );
         }
         if (reader.header.canonical != 0) != meta.canonical {
             bail!(
-                "{} has canonical={}, expected canonical={} from {}",
+                "incompatible .kite inputs: {} has canonical={}, but {} has canonical={}.\nAll input .kite files must agree on canonical mode.",
                 name,
                 reader.header.canonical != 0,
-                meta.canonical,
-                first_name
+                first_name,
+                meta.canonical
             );
         }
         if reader.header.partitions as usize != meta.partitions {
             bail!(
-                "{} has partitions={}, expected partitions={} from {}",
+                "incompatible .kite inputs: {} has partitions={}, but {} has partitions={}.\nAll input .kite files must use the same partition count.",
                 name,
                 reader.header.partitions,
-                meta.partitions,
-                first_name
+                first_name,
+                meta.partitions
             );
         }
         if reader.header.key_width != meta.key_width {
             bail!(
-                "{} has key_width={}, expected key_width={} from {}",
+                "incompatible .kite inputs: {} has key_width={}, but {} has key_width={}.\nAll input .kite files must use the same key width.",
                 name,
                 reader.header.key_width,
-                meta.key_width,
-                first_name
+                first_name,
+                meta.key_width
             );
         }
     }

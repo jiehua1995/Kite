@@ -140,12 +140,24 @@ impl CountStats {
                     ),
                     ("threads", actual_threads.to_string()),
                     ("partitions", actual_partitions.to_string()),
-                    ("chunk_kmers", args.chunk_kmers.to_string()),
+                    (
+                        "chunk_kmers",
+                        if args.chunk_kmers == 0 {
+                            "auto".to_string()
+                        } else {
+                            args.chunk_kmers.to_string()
+                        },
+                    ),
                     (
                         "memory",
                         args.memory.as_deref().unwrap_or("auto").to_string(),
                     ),
-                    ("buffer_mb", args.buffer.to_string()),
+                    (
+                        "buffer_mb",
+                        args.buffer
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "auto".to_string()),
+                    ),
                 ],
             ),
             ReportSection::new(
@@ -337,6 +349,15 @@ pub struct DumpStats {
     pub coldest_shard_partitions: AtomicU64,
     pub hottest_shard_bytes: AtomicU64,
     pub coldest_shard_bytes: AtomicU64,
+    pub queue_governor_wait_ns: AtomicU64,
+    pub current_inflight_bytes: AtomicU64,
+    pub current_inflight_slabs: AtomicU64,
+    pub peak_inflight_bytes: AtomicU64,
+    pub peak_inflight_slabs: AtomicU64,
+    pub writer_write_calls: AtomicU64,
+    pub budget_grow_events: AtomicU64,
+    pub budget_shrink_events: AtomicU64,
+    pub final_budget_bytes: AtomicU64,
 }
 
 impl DumpStats {
@@ -368,6 +389,32 @@ impl DumpStats {
     }
     pub fn add_format_ns(&self, n: u64) {
         self.format_ns.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn add_writer_queue_wait_ns(&self, n: u64) {
+        self.writer_queue_wait_ns.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn add_writer_io_ns(&self, n: u64) {
+        self.writer_io_ns.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn observe_inflight(&self, bytes: u64, slabs: u64) {
+        self.current_inflight_bytes.store(bytes, Ordering::Relaxed);
+        self.current_inflight_slabs.store(slabs, Ordering::Relaxed);
+        let _ =
+            self.peak_inflight_bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(cur.max(bytes))
+                });
+        let _ =
+            self.peak_inflight_slabs
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(cur.max(slabs))
+                });
+    }
+    pub fn inc_writer_write_calls(&self) {
+        self.writer_write_calls.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn set_final_budget_bytes(&self, bytes: u64) {
+        self.final_budget_bytes.store(bytes, Ordering::Relaxed);
     }
     pub fn inc_partitions(&self) {
         self.partitions_processed.fetch_add(1, Ordering::Relaxed);
@@ -407,13 +454,26 @@ impl DumpStats {
         let format_ms = self.format_ns.load(Ordering::Relaxed) / 1_000_000;
         let writer_queue_wait_ms = self.writer_queue_wait_ns.load(Ordering::Relaxed) / 1_000_000;
         let writer_io_ms = self.writer_io_ns.load(Ordering::Relaxed) / 1_000_000;
+        let queue_governor_wait_ms =
+            self.queue_governor_wait_ns.load(Ordering::Relaxed) / 1_000_000;
         let concat_ms = self.concat_ns.load(Ordering::Relaxed) / 1_000_000;
         let peak_rss_mb = get_peak_rss_mb();
         let longest_worker_ms = self.longest_worker_ns.load(Ordering::Relaxed) / 1_000_000;
         let shortest_worker_ms = self.shortest_worker_ns.load(Ordering::Relaxed) / 1_000_000;
         let cpu_util_pct = get_process_cpu_util_pct(wall);
+        let peak_inflight_bytes = self.peak_inflight_bytes.load(Ordering::Relaxed);
+        let peak_inflight_slabs = self.peak_inflight_slabs.load(Ordering::Relaxed);
+        let writer_write_calls = self.writer_write_calls.load(Ordering::Relaxed);
+        let budget_grow_events = self.budget_grow_events.load(Ordering::Relaxed);
+        let budget_shrink_events = self.budget_shrink_events.load(Ordering::Relaxed);
+        let final_budget_bytes = self.final_budget_bytes.load(Ordering::Relaxed);
         let throughput_mb_s = if wall.as_secs_f64() > 0.0 {
             bwrite as f64 / 1024.0 / 1024.0 / wall.as_secs_f64()
+        } else {
+            0.0
+        };
+        let avg_write_call_mb = if writer_write_calls > 0 {
+            bwrite as f64 / 1024.0 / 1024.0 / writer_write_calls as f64
         } else {
             0.0
         };
@@ -447,6 +507,7 @@ impl DumpStats {
                         ("decode", fmt_millis(decode_ms)),
                         ("merge", fmt_millis(merge_ms)),
                         ("format", fmt_millis(format_ms)),
+                        ("queue_governor_wait", fmt_millis(queue_governor_wait_ms)),
                         ("writer_queue_wait", fmt_millis(writer_queue_wait_ms)),
                         ("writer_io", fmt_millis(writer_io_ms)),
                         ("concat", fmt_millis(concat_ms)),
@@ -459,6 +520,13 @@ impl DumpStats {
                     vec![
                         ("cpu_util_pct", format!("{:.1}", cpu_util_pct)),
                         ("peak_rss_mb", peak_rss_mb.to_string()),
+                        ("peak_inflight_bytes", fmt_bytes(peak_inflight_bytes)),
+                        ("peak_inflight_slabs", peak_inflight_slabs.to_string()),
+                        ("writer_write_calls", writer_write_calls.to_string()),
+                        ("avg_write_call_mb", format!("{:.2}", avg_write_call_mb)),
+                        ("budget_grow_events", budget_grow_events.to_string()),
+                        ("budget_shrink_events", budget_shrink_events.to_string()),
+                        ("final_budget_bytes", fmt_bytes(final_budget_bytes)),
                     ],
                 ),
                 ReportSection::new(

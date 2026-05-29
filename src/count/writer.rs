@@ -52,6 +52,7 @@ pub struct ConcurrentKiteWriter {
     file_state: Mutex<KiteFileState>,
     write_tx_probe: Option<Sender<Vec<u8>>>,
     write_thread: Option<JoinHandle<io::Result<File>>>,
+    finalize_file_layout: bool,
     budget: SharedBudget,
     k: u8,
     canonical: bool,
@@ -86,6 +87,10 @@ impl ConcurrentKiteWriter {
         max_count: Option<u32>,
     ) -> io::Result<Self> {
         let mut file = File::create(output_path)?;
+        let finalize_file_layout = file
+            .metadata()
+            .map(|metadata| metadata.file_type().is_file())
+            .unwrap_or(true);
         let header = KiteHeader::new(k, canonical, partitions as u32, key_width, codec_mask)
             .with_count_filters(min_count, max_count);
         let mut header_buf = vec![0u8; KiteHeader::SIZE];
@@ -121,6 +126,7 @@ impl ConcurrentKiteWriter {
             }),
             write_tx_probe: Some(write_tx_probe),
             write_thread: Some(write_thread),
+            finalize_file_layout,
             budget,
             k,
             canonical,
@@ -443,34 +449,36 @@ impl ConcurrentKiteWriter {
         }
         trailer.extend_from_slice(&footer_buf);
 
-        raw_file.seek(SeekFrom::Start(data_end))?;
-        raw_file.write_all(&trailer)?;
+        if self.finalize_file_layout {
+            raw_file.seek(SeekFrom::Start(data_end))?;
+            raw_file.write_all(&trailer)?;
 
-        let mut header_buf = vec![0u8; KiteHeader::SIZE];
-        {
-            let mut cursor = std::io::Cursor::new(&mut header_buf[..]);
-            KiteHeader {
-                magic: crate::format::header::KITE_MAGIC,
-                version: crate::format::header::KITE_VERSION,
-                k: self.k,
-                canonical: self.canonical as u8,
-                partitions: self.partitions as u32,
-                key_width: self.key_width,
-                codec_mask: self.codec_mask,
-                checksum_mode: 0,
-                chunk_index_offset,
-                partition_table_offset,
-                footer_offset,
-                total_chunks,
-                total_rows,
-                min_count: self.min_count,
-                max_count: self.max_count,
+            let mut header_buf = vec![0u8; KiteHeader::SIZE];
+            {
+                let mut cursor = std::io::Cursor::new(&mut header_buf[..]);
+                KiteHeader {
+                    magic: crate::format::header::KITE_MAGIC,
+                    version: crate::format::header::KITE_VERSION,
+                    k: self.k,
+                    canonical: self.canonical as u8,
+                    partitions: self.partitions as u32,
+                    key_width: self.key_width,
+                    codec_mask: self.codec_mask,
+                    checksum_mode: 0,
+                    chunk_index_offset,
+                    partition_table_offset,
+                    footer_offset,
+                    total_chunks,
+                    total_rows,
+                    min_count: self.min_count,
+                    max_count: self.max_count,
+                }
+                .write_to(&mut cursor)?;
             }
-            .write_to(&mut cursor)?;
+            raw_file.seek(SeekFrom::Start(0))?;
+            raw_file.write_all(&header_buf)?;
+            raw_file.set_len(total_size)?;
         }
-        raw_file.seek(SeekFrom::Start(0))?;
-        raw_file.write_all(&header_buf)?;
-        raw_file.set_len(total_size)?;
 
         Ok(FinalizeSummary {
             total_chunks,

@@ -61,6 +61,8 @@ struct HeuristicPlan {
     sampled_reads: u64,
     sampled_input_bytes: u64,
     sampled_decomp_bytes: usize,
+    chunk_size_bytes: usize,
+    chunk_kmers: usize,
     partitions: usize,
     staging_bytes: usize,
     decomp_threads: usize,
@@ -206,17 +208,24 @@ fn fmt_duration_compact(duration: Duration) -> String {
 pub fn run_count(args: &CountArgs) -> anyhow::Result<()> {
     print_command_line("count");
     if args.k < 1 || args.k > 128 {
-        anyhow::bail!("k must be between 1 and 128 (got {})", args.k);
+        anyhow::bail!(
+            "invalid k-mer length: --k must be between 1 and 128.\nGot: {}\nExample: --k 21",
+            args.k
+        );
     }
     if args.partitions != 0 && !args.partitions.is_power_of_two() {
         anyhow::bail!(
-            "--partitions must be a power of 2 (got {})",
+            "invalid partition count: --partitions must be a power of 2 because kite uses partition bits for routing.\nGot: {}\nExamples: 256, 512, 1024",
             args.partitions
         );
     }
     if let (Some(min), Some(max)) = (args.min, args.max) {
         if min > max {
-            anyhow::bail!("--min ({}) must be <= --max ({})", min, max);
+            anyhow::bail!(
+                "invalid count filter range: --min must be less than or equal to --max.\nGot: --min {} --max {}",
+                min,
+                max
+            );
         }
     }
 
@@ -230,8 +239,12 @@ pub fn run_count(args: &CountArgs) -> anyhow::Result<()> {
 }
 
 fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
-    if !args.output.ends_with(".kite") {
-        anyhow::bail!("count output must use .kite suffix (got '{}')", args.output);
+    let output_is_null = args.output == "/dev/null";
+    if !output_is_null && !args.output.ends_with(".kite") {
+        anyhow::bail!(
+            "invalid count output path: output must end with .kite, or be /dev/null for benchmark runs.\nGot: {}\nExample: -o result.kite",
+            args.output
+        );
     }
 
     let key_width: u16 = match K::entry_size() {
@@ -248,20 +261,30 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
 
     if let Some(parent) = Path::new(&args.output).parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to create output directory for count output.\nDirectory: {}\nReason: {}",
+                    parent.display(),
+                    err
+                )
+            })?;
         }
     }
 
     let hard_memory_limit_bytes = resolve_memory_limit_bytes(args.memory.as_deref())?;
-    let compression = detect_compression(Path::new(&args.input))?;
-    let chunk_size_bytes = (args.chunk_kmers * 2).max(8 * MIB).min(64 * MIB);
+    let compression = detect_compression(Path::new(&args.input)).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to inspect input FASTQ compression.\nInput: {}\nReason: {}",
+            args.input,
+            err
+        )
+    })?;
     let _applied_memory_limit = apply_process_memory_limit(hard_memory_limit_bytes)?;
     let plan = derive_heuristic_plan(
         args,
         compression,
         key_width,
         n_threads,
-        chunk_size_bytes,
         hard_memory_limit_bytes,
     )?;
 
@@ -299,6 +322,11 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
 
     eprintln!("[kite count] input:       {}", args.input);
     eprintln!("[kite count] output:      {}", args.output);
+    if output_is_null {
+        eprintln!(
+            "[kite count][auto] Output is not a regular .kite file; final file layout rewrite disabled"
+        );
+    }
     eprintln!("[kite count] compression: {}", compression);
     eprintln!(
         "[kite count] k={}, canonical={}, partitions={}, min={}, max={}",
@@ -340,8 +368,10 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
             plan.encoding_factor,
         );
         eprintln!(
-            "[kite count][auto] P={}, S={}MB, W={:.2}GB/worker, queue_depth={}, decomp_budget={:.1}MB",
+            "[kite count][auto] P={}, chunk_kmers={}, chunk={}MB, S={}MB, W={:.2}GB/worker, queue_depth={}, decomp_budget={:.1}MB",
             plan.partitions,
+            plan.chunk_kmers,
+            plan.chunk_size_bytes / MIB,
             plan.staging_bytes / MIB,
             plan.worker_budget_bytes as f64 / GIB as f64,
             plan.queue_depth,
@@ -369,6 +399,7 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
     let decomp_threads = plan.decomp_threads;
     let worker_threads = plan.worker_threads;
     let partitions = plan.partitions;
+    let chunk_size_bytes = plan.chunk_size_bytes;
     let staging_bytes = plan.staging_bytes;
     let local_flush_bytes = plan.local_flush_bytes;
     let zstd_level = args.mode.zstd_level();
@@ -413,7 +444,16 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
             if let Ok(meta) = std::fs::metadata(&input_path) {
                 stats_reader.add_comp_bytes(meta.len());
             }
-            let file = open_input(Path::new(&input_path)).expect("open input");
+            let file = match open_input(Path::new(&input_path)) {
+                Ok(file) => file,
+                Err(err) => {
+                    eprintln!(
+                        "[kite count] failed to open input FASTQ.\nInput: {}\nReason: {}",
+                        input_path, err
+                    );
+                    return;
+                }
+            };
             let buffered = std::io::BufReader::with_capacity(2 * MIB, file);
             let mut reader = GzipChunkedReader::new(buffered, chunk_size_bytes);
             loop {
@@ -439,7 +479,16 @@ fn run_count_typed<K: KmerWord>(args: &CountArgs) -> anyhow::Result<()> {
             if let Ok(meta) = std::fs::metadata(&input_path) {
                 stats_reader.add_comp_bytes(meta.len());
             }
-            let file = open_input(Path::new(&input_path)).expect("open input");
+            let file = match open_input(Path::new(&input_path)) {
+                Ok(file) => file,
+                Err(err) => {
+                    eprintln!(
+                        "[kite count] failed to open input FASTQ.\nInput: {}\nReason: {}",
+                        input_path, err
+                    );
+                    return;
+                }
+            };
             let buffered = std::io::BufReader::with_capacity(2 * MIB, file);
             let mut reader = PlainChunkedReader::new(buffered, chunk_size_bytes);
             loop {
@@ -577,14 +626,13 @@ fn derive_heuristic_plan(
     compression: CompressionType,
     key_width: u16,
     total_threads: usize,
-    chunk_size_bytes: usize,
     total_memory_bytes: usize,
 ) -> anyhow::Result<HeuristicPlan> {
     let input_bytes = std::fs::metadata(&args.input).map(|m| m.len()).unwrap_or(0);
     let sample = sample_input(Path::new(&args.input), compression)?;
     let encoding_factor = encoding_factor_for(key_width);
     let target_partition_bytes = target_partition_bytes_for(args.k, key_width);
-    let min_worker_budget = GIB / 2;
+    let min_worker_budget = target_worker_budget_bytes(args.k, key_width, total_memory_bytes);
     let mut reasons = Vec::new();
 
     reasons.push(format!(
@@ -634,13 +682,13 @@ fn derive_heuristic_plan(
         }
     };
 
-    let queue_depth = match compression {
-        CompressionType::Plain => 8,
-        _ => decomp_threads.saturating_mul(2).clamp(8, 64),
+    let mmap_reserve_bytes = match compression {
+        CompressionType::Bgzf => input_bytes as usize,
+        _ => 0,
     };
-    let decomp_budget_bytes = chunk_size_bytes.saturating_mul(queue_depth);
     let untracked_reserve_bytes =
-        estimate_untracked_reserve_bytes(total_memory_bytes, total_threads, decomp_threads);
+        estimate_untracked_reserve_bytes(total_memory_bytes, total_threads, decomp_threads)
+            .saturating_add(mmap_reserve_bytes);
     let mut worker_threads = total_threads.saturating_sub(decomp_threads + 1).max(1);
     reasons.push(format!(
         "worker_threads={} after reserving one reader slot",
@@ -650,6 +698,12 @@ fn derive_heuristic_plan(
         "Reserved {:.1}GB for allocator/thread-stack/decompress overhead outside the tracked hot-path budget",
         untracked_reserve_bytes as f64 / GIB as f64,
     ));
+    if mmap_reserve_bytes > 0 {
+        reasons.push(format!(
+            "Reserved {:.1}GB for BGZF compressed-input mmap under RLIMIT_AS",
+            mmap_reserve_bytes as f64 / GIB as f64,
+        ));
+    }
     let mut partitions = if args.partitions != 0 {
         reasons.push(format!("Using user-defined partitions={}", args.partitions));
         args.partitions
@@ -660,6 +714,12 @@ fn derive_heuristic_plan(
             encoding_factor,
             target_partition_bytes,
         );
+        let capped = memory_thread_capped_partitions(
+            derived,
+            total_memory_bytes,
+            worker_threads,
+            args.buffer,
+        );
         let estimated_physical_gb =
             estimated_partitionable_bytes(input_bytes, sample.avg_read_len, encoding_factor) as f64
                 / GIB as f64;
@@ -669,18 +729,34 @@ fn derive_heuristic_plan(
             estimated_physical_gb,
             target_partition_bytes / MIB,
         ));
-        derived
+        if capped < derived {
+            reasons.push(format!(
+                "Capped auto partitions to {} from memory/thread staging budget with {} initial workers",
+                capped, worker_threads,
+            ));
+        }
+        capped
     };
 
-    let requested_staging_mb = args.buffer.max(4);
-    let mut staging_candidates_mb = vec![requested_staging_mb, 16usize, 8, 4];
-    staging_candidates_mb.retain(|value| *value <= requested_staging_mb);
+    let mut staging_candidates_mb = if let Some(requested) = args.buffer {
+        let requested = requested.max(1);
+        let mut candidates = vec![requested, 16usize, 8, 4, 2, 1];
+        candidates.retain(|value| *value <= requested);
+        candidates
+    } else {
+        vec![16usize, 8, 4, 2]
+    };
     staging_candidates_mb.sort_unstable_by(|left, right| right.cmp(left));
     staging_candidates_mb.dedup();
 
     let mut staging_index = 0usize;
     loop {
         let staging_bytes = staging_candidates_mb[staging_index] * MIB;
+        let chunk_size_bytes =
+            resolve_chunk_size_bytes(args.chunk_kmers, total_memory_bytes, worker_threads);
+        let chunk_kmers = chunk_size_bytes / 2;
+        let queue_depth = queue_depth_for(compression, decomp_threads, total_memory_bytes);
+        let decomp_budget_bytes = chunk_size_bytes.saturating_mul(queue_depth);
         let reserved_bytes = decomp_budget_bytes
             .saturating_add(partitions.saturating_mul(staging_bytes))
             .saturating_add(worker_threads.saturating_mul(WORKER_SCRATCH_BYTES))
@@ -704,7 +780,12 @@ fn derive_heuristic_plan(
             && tracked_budget_bytes > 0
             && worker_budget_bytes >= min_worker_budget
         {
-            if staging_index > 0 {
+            if args.buffer.is_none() {
+                reasons.push(format!(
+                    "Auto staging selected {}MB from memory budget",
+                    staging_candidates_mb[staging_index],
+                ));
+            } else if staging_index > 0 {
                 reasons.push(format!(
                     "Reduced staging to {}MB to save worker budget",
                     staging_candidates_mb[staging_index],
@@ -716,6 +797,14 @@ fn derive_heuristic_plan(
                     worker_budget_bytes as f64 / GIB as f64,
                 ));
             }
+            if args.chunk_kmers == 0 {
+                reasons.push(format!(
+                    "Auto chunk_kmers={} ({}MB chunks) from memory budget and {} count workers",
+                    chunk_kmers,
+                    chunk_size_bytes / MIB,
+                    worker_threads,
+                ));
+            }
             return Ok(HeuristicPlan {
                 encoding_factor,
                 input_bytes,
@@ -723,6 +812,8 @@ fn derive_heuristic_plan(
                 sampled_reads: sample.sampled_reads,
                 sampled_input_bytes: sample.sampled_input_bytes,
                 sampled_decomp_bytes: sample.sampled_decomp_bytes,
+                chunk_size_bytes,
+                chunk_kmers,
                 partitions,
                 staging_bytes,
                 decomp_threads,
@@ -744,23 +835,23 @@ fn derive_heuristic_plan(
             continue;
         }
 
-        if args.partitions == 0 && partitions > AUTO_MIN_PARTITIONS {
-            partitions /= 2;
-            staging_index = 0;
-            reasons.push(format!(
-                "Reduced partitions to {} because worker budget dropped below {:.1}GB/worker",
-                partitions,
-                min_worker_budget as f64 / GIB as f64,
-            ));
-            continue;
-        }
-
         if worker_threads > 1 {
             worker_threads -= 1;
             staging_index = 0;
             reasons.push(format!(
                 "Reduced worker_threads to {} to protect per-worker budget",
                 worker_threads,
+            ));
+            continue;
+        }
+
+        if args.partitions == 0 && partitions > AUTO_MIN_PARTITIONS {
+            partitions /= 2;
+            staging_index = 0;
+            reasons.push(format!(
+                "Reduced partitions to {} because memory budget stayed below {:.2}GB/worker at one worker",
+                partitions,
+                min_worker_budget as f64 / GIB as f64,
             ));
             continue;
         }
@@ -787,6 +878,75 @@ fn estimate_untracked_reserve_bytes(
         .saturating_add(codec_bytes)
         .clamp(2 * GIB, 12 * GIB)
         .min(hard_limit_bytes / 3)
+}
+
+fn target_worker_budget_bytes(k: u8, key_width: u16, total_memory_bytes: usize) -> usize {
+    let target = match (key_width, k) {
+        (KEY_WIDTH_U64, 0..=31) => 1250 * MIB,
+        (KEY_WIDTH_U128, _) => 2 * GIB,
+        _ => 3 * GIB,
+    };
+    target.min(total_memory_bytes.saturating_div(2).max(512 * MIB))
+}
+
+fn queue_depth_for(
+    compression: CompressionType,
+    decomp_threads: usize,
+    total_memory_bytes: usize,
+) -> usize {
+    let base = match compression {
+        CompressionType::Plain => 8,
+        _ => decomp_threads.saturating_mul(2).clamp(8, 64),
+    };
+    let memory_cap = (total_memory_bytes / GIB).clamp(8, 64);
+    base.min(memory_cap)
+}
+
+fn resolve_chunk_size_bytes(
+    requested_chunk_kmers: usize,
+    total_memory_bytes: usize,
+    worker_threads: usize,
+) -> usize {
+    if requested_chunk_kmers != 0 {
+        return requested_chunk_kmers
+            .saturating_mul(2)
+            .max(8 * MIB)
+            .min(64 * MIB);
+    }
+
+    total_memory_bytes
+        .checked_div(worker_threads.max(1).saturating_mul(96))
+        .unwrap_or(8 * MIB)
+        .clamp(8 * MIB, 64 * MIB)
+}
+
+fn memory_thread_capped_partitions(
+    payload_partitions: usize,
+    total_memory_bytes: usize,
+    worker_threads: usize,
+    requested_buffer_mb: Option<usize>,
+) -> usize {
+    let planning_staging_mb = requested_buffer_mb.unwrap_or(8).max(1);
+    let per_partition_bytes = planning_staging_mb
+        .saturating_mul(MIB)
+        .saturating_add(worker_threads.saturating_mul(5 * 1024));
+    let partition_budget = total_memory_bytes / 4;
+    let capped = partition_budget
+        .checked_div(per_partition_bytes.max(1))
+        .unwrap_or(AUTO_MIN_PARTITIONS)
+        .max(AUTO_MIN_PARTITIONS);
+    let capped = floor_power_of_two(capped);
+    payload_partitions
+        .min(capped)
+        .clamp(AUTO_MIN_PARTITIONS, AUTO_MAX_PARTITIONS)
+}
+
+fn floor_power_of_two(value: usize) -> usize {
+    if value <= 1 {
+        1
+    } else {
+        1usize << (usize::BITS - 1 - value.leading_zeros())
+    }
 }
 
 fn codec_policy_label(entry_size: usize, zstd_level: i32) -> &'static str {
