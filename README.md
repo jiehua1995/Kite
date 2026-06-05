@@ -1,7 +1,7 @@
 # Kite
 
 <p>
-	<img src="doc/logo.png" alt="logo" width="100" align="left">
+	<img src="doc/logo.svg" alt="logo" width="100" align="left">
 </p> 
 **Kite** is a high-performance Rust toolkit for exact k-mer counting, reusable `.kite` indexes, inspection, and downstream multi-sample analysis.
 

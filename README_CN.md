@@ -1,7 +1,7 @@
 # Kite
 
 <p>
-	<img src="./doc/logo.png" alt="logo" width="100" align="left">
+	<img src="./doc/logo.svg" alt="logo" width="100" align="left">
 </p>
 
 **Kite** 是一个用 Rust 编写的高性能精确 k-mer 工具箱，覆盖了从计数、可复用 `.kite` 索引、导出，到多样本分析和 Quarto/R 报告生成的一整条流程。
